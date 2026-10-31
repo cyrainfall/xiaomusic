@@ -174,3 +174,7 @@ node_modules
 reference/
 .aone_copilot/
 .idea/
+
+# 本地运行配置（每台机器不同）
+/config.json
+/.tmp/
