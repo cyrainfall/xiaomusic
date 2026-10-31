@@ -1,0 +1,12 @@
+--- a/xiaomusic/js_plugin_manager.py
++++ b/xiaomusic/js_plugin_manager.py
+@@ -2546,6 +2546,9 @@
+ 
+     # 启用插件
+     def enable_plugin(self, plugin_name: str) -> bool:
++        # 未启用的插件在启动时不会被加载，此处先补一个占位，避免"永远启用不了"
++        if plugin_name not in self.plugins:
++            self.plugins[plugin_name] = {"name": plugin_name, "enabled": False}
+         if plugin_name in self.plugins:
+             self.plugins[plugin_name]["enabled"] = True
+             # 读取、修改 插件配置json文件：① 将plugins_info属性中对于的插件状态改为禁用、2：将 enabled_plugins中对应插件移除

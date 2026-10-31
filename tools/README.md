@@ -38,6 +38,21 @@ tasklist | findstr xiaomusic      # 看进程
 
 启动结果会追加到 `tools/startup.log`，方便确认当天是否开启了监听。
 
+## 运行时补丁
+
+`.venv` 中的两处修改不在 git 管理范围，`pip install -U xiaomusic` 升级后会被覆盖：
+
+| 补丁 | 作用 |
+|---|---|
+| `api_routers_file.py.patch` | B 站转码流：读超时 60s → 120s，去掉 600s 总时长硬切断 |
+| `js_plugin_manager.py.patch` | 允许在后台启用"未加载"的插件（修复 `启用插件失败: undefined`） |
+
+重新应用（幂等，可重复执行）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\reapply-patches.ps1
+```
+
 ## 已知限制
 
 - 服务以当前用户身份在登录后启动，未登录时不会运行；

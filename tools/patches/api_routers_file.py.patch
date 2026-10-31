@@ -1,0 +1,11 @@
+--- a/xiaomusic/api/routers/file.py
++++ b/xiaomusic/api/routers/file.py
+@@ -1078,7 +1078,7 @@
+     async def _feed_ffmpeg():
+         try:
+             async with aiohttp.ClientSession(
+-                timeout=aiohttp.ClientTimeout(total=600, sock_read=60),
++                timeout=aiohttp.ClientTimeout(total=None, sock_read=120),
+                 connector=aiohttp.TCPConnector(ssl=True),
+             ) as session:
+                 async with session.get(url, headers=headers) as resp:
