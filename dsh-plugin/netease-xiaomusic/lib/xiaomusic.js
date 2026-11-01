@@ -7,14 +7,16 @@
  */
 
 /**
- * @param {{xiaomusic: {baseUrl: string, username: string, password: string}, timeouts: {xiaomusicMs: number}}} cfg
+ * @param {{xiaomusic: {baseUrl: string, username: string, httpauthPassword: string}, timeouts: {xiaomusicMs: number}}} cfg
  * @param {{info?: Function, warn?: Function, debug?: Function}} [logger]
  */
 export function createXiaomusic(cfg, logger) {
   const base = cfg.xiaomusic.baseUrl
+  // `username`/`httpauthPassword` are the API's own basic-auth pair; the Xiaomi
+  // account password is a different secret and must never be sent here.
   const auth =
-    cfg.xiaomusic.username || cfg.xiaomusic.password
-      ? `Basic ${Buffer.from(`${cfg.xiaomusic.username}:${cfg.xiaomusic.password}`).toString('base64')}`
+    cfg.xiaomusic.username || cfg.xiaomusic.httpauthPassword
+      ? `Basic ${Buffer.from(`${cfg.xiaomusic.username}:${cfg.xiaomusic.httpauthPassword}`).toString('base64')}`
       : undefined
 
   /** @param {string} path @param {{method?: string, body?: unknown, timeoutMs?: number}} [opts] */

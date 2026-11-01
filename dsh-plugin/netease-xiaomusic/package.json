@@ -1,9 +1,9 @@
 {
   "name": "@local/netease-xiaomusic",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Play NetEase Cloud Music on Xiaomi speakers through xiaomusic: ncm-cli picks the song, an account cookie resolves the stream, xiaomusic pushes it to the speaker.",
+  "description": "Play NetEase Cloud Music on Xiaomi speakers. Bundles a managed xiaomusic runtime, so installing this plugin is the only install step: ncm-cli picks the song, an account cookie resolves the stream, xiaomusic pushes it to the speaker.",
   "license": "MIT",
   "main": "./index.js",
   "icon": "./icon.svg",
@@ -24,6 +24,7 @@
   "files": [
     "index.js",
     "lib/",
+    "vendor/",
     "locale/",
     "icon.svg",
     "cordis.patch.yml"

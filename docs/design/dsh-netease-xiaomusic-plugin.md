@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | **v0.15（延时关闭已修）** |
+| 状态 | **v0.21（零安装：插件自带 xiaomusic）** |
 | 目标仓库 | `xiaomusic`（本仓库）+ 新增 DSH 插件包 |
 | 关键依赖 | `@music163/ncm-cli` ≥ 0.1.7、DeepSeek Harness（DSH）Host 插件体系、xiaomusic HTTP API |
 | 参考 | [ncm-cli 官网](https://music.163.com/st/ncmcli#setup)、[NetEase/skills](https://github.com/NetEase/skills) |
@@ -1110,6 +1110,60 @@ v0.18 之后音量确实改了（日志 `识别为音量调整: 20`），但用�
 
 
 
+### 17.0.9 零安装：把 xiaomusic 变成插件的依赖
+
+需求：装完 DSH 插件就能用，不要再让用户自己跑 `start-xiaomusic.bat`，也不要先手工装 Python 包。
+
+问题在于此前 xiaomusic 是**并列的外部服务**：用户自己建 venv、自己 `pip install`、自己起进程，插件只是个客户端。补丁（`agent_bridge.py`、`command_handler.py`、`device_player.py`、`xiaomusic.py`、`config.py`、`api/routers/device.py`）还必须手抄进站点包，`pip install -U` 一升级就全丢。
+
+改造：新增 `lib/runtime.js`，把整条安装链搬到插件里。
+
+| 步骤 | 实现 |
+| --- | --- |
+| 解释器 | `uv venv --python 3.12 <home>/.venv`；没有 uv 退回 `python -m venv`；也可用 `xiaomusic.python` 指定已有解释器 |
+| 包 | `pip install xiaomusic==<version>`，先清华镜像后官方源 |
+| 补丁 | `vendor/xiaomusic/` 6 个文件覆盖进站点包，`home/.dsh-overlay.json` 记版本+文件哈希，升级/重装后自动重打 |
+| 配置 | `home/config.json` 不存在才按需生成（绝对路径、`get_duration_type=mutagen`、已开桥接）；`home/conf/setting.json` 已存在则只补桥接键 |
+| 进程 | `python -m xiaomusic.cli --config config.json`，健康检查 `/getsetting` 轮询到就绪，崩溃指数退避重启，插件卸载时 `taskkill /T` |
+| 端口 | 已有服务能响应 `/getsetting` 就直接复用，不抢；只有端口被占但无响应才报 `PORT_BUSY` |
+| 站点包定位 | 问解释器要 `sysconfig.get_paths()["purelib"]`，而不是猜 `Lib/site-packages`（复用外部解释器时猜错） |
+
+配置归一化的两处配合：
+
+- `baseUrl` 指向非本机地址 → 自动 `managed:false`，只连外部服务；`managed:false` 也可显式写；
+- `username`/`httpauthPassword` 才是 xiaomusic 的 HTTP basic auth，小米账号密码不再误当 API 密码发出。
+
+工具侧新增 `xm_setup`：报告「服务是否就绪 / cookie 在不在 / 认到哪些音箱」，并支持写入小米账号、`miDid`、MUSIC_U（写文件，不走日志），改完自动重启。其余工具在动作前 `awaitRuntime()`，首次安装那几十秒里等待而不是误报「连不上 xiaomusic」。
+
+实测（真机，全新目录）：
+
+```
+home = C:\Users\cyx\AppData\Local\Temp\xm-runtime-probe
+[INFO] 用 uv 创建 Python 环境（…\.venv）
+[INFO] 安装 xiaomusic==0.6.1（当前 无），首次安装约需 10-60 秒
+[INFO] 已覆盖 6 个补丁文件到 …\.venv\Lib\site-packages\xiaomusic
+[INFO] 已生成默认配置 …\config.json
+[INFO] xiaomusic 已就绪 http://127.0.0.1:8091
+start() => { ok: true, started: true } 6164ms
+getsetting: enable_agent_bridge=true, agent_bridge_url=http://127.0.0.1:3071/ask,
+            music_path=…\music, hostname=http://100.64.0.8, get_duration_type=mutagen
+补丁生效: parse_volume=True parse_stop_delay=True resume_pushed_url=True settle_before_play=True
+```
+
+接管已有安装（`home` 里已有 `config.json` + `conf/setting.json`）：
+
+```
+[INFO] 已在 conf/setting.json 打开语音桥接
+start() => { ok: true, started: true }
+config.json  music_path 保留 = true | hostname 保留 = true
+setting.json music_path 保留 = true | key_word_dict 保留 = true
+setting.json enable_agent_bridge = true | agent_bridge_url = http://127.0.0.1:3071/ask
+```
+
+即用户自己的歌单目录和口令配置不被覆盖，只多出桥接键。
+
+已知边界：托管运行时不带 ffmpeg（TTS 时长改走 mutagen，B 站转码类功能不可用）；小米账号扫码登录仍需打开 xiaomusic 的 Web 界面，`xm_setup` 只做账号密码。
+
 ### 17.1 M1 结构
 
 **代码位置**：`dsh-plugin/netease-xiaomusic/`（bundle 包名 `@local/netease-xiaomusic`）。
@@ -1118,19 +1172,27 @@ v0.18 之后音量确实改了（日志 `识别为音量调整: 20`），但用�
 dsh-plugin/netease-xiaomusic/
 ├── package.json          # dsh.bundle.patch + exports(locale/icon)
 ├── cordis.patch.yml      # 插入 netease-xiaomusic 行
-├── index.js              # apply(ctx, config)：建客户端 + 注册 6 个工具
+├── index.js              # apply(ctx, config)：建客户端 + 托管运行时 + 注册 7 个工具
 ├── lib/
 │   ├── config.js         # 运行时配置归一化（无 Config 导出）
+│   ├── runtime.js        # 托管 xiaomusic：建环境/装包/打补丁/生成配置/守护进程
 │   ├── ncm.js            # ncm-cli 定位（解析 .cmd shim）+ 搜索 + 错误归一
 │   ├── netease.js        # player/url/v1 + MUSIC_U + 歌手目录
 │   ├── resolve.js        # 口语请求 → 候选（歌手请求 vs 歌名请求）+ 打分
 │   ├── xiaomusic.js      # HTTP 客户端（设备/推流/TTS/控制/状态）
-│   └── tools.js          # 6 个 raw JSON-Schema 工具定义
+│   └── tools.js          # 7 个 raw JSON-Schema 工具定义
+├── vendor/xiaomusic/     # 打过补丁的 xiaomusic 源码（覆盖进站点包）
+│   ├── agent_bridge.py
+│   ├── command_handler.py
+│   ├── config.py
+│   ├── device_player.py
+│   ├── xiaomusic.py
+│   └── api/routers/device.py
 ├── locale/{zh,en}.json
 └── icon.svg
 ```
 
-**工具**：`speaker_list`、`ncm_search`、`ncm_play`、`ncm_control`、`ncm_status`、`speaker_say`。
+**工具**：`xm_setup`、`speaker_list`、`ncm_search`、`ncm_play`、`ncm_control`、`ncm_status`、`speaker_say`。
 
 **实现取舍（与设计稿的偏差，均已实测）**：
 
@@ -1234,4 +1296,5 @@ strict-peer-dependencies=false     # 让缺失 peer 降级为 warning
 | v0.18 | 修「音量调整为20%」被当点歌（先念「好的，正在找歌」）：xiaomusic 没有音量关键词，口令兜底进了大模型；新增 `parse_volume()` 在 `match_cmd` 前本地执行，支持绝对/相对/最大最小/静音，且不影响以播放动词开头的句子；实测调音量不再打断音乐（17.0.6） |
 | v0.19 | 修音量口令后「只听到一声好的，音乐没了」：小爱自己的语音助手应答时会抢占播放，外部推流无人续上；新增 `resume_pushed_url_if_stopped()`，音量口令后轮询 8 秒，发现设备未播放即重新推流；实测应答后自动续播、音量保持（17.0.7） |
 | v0.20 | 修「播完没有下一首」：外部推流没有时长、xiaomusic 不会排下一首；插件随 `/playurl` 带 `durationSec`，xiaomusic 据此排定时器，到点走 `_play_from_agent_queue()` 回插件队列接力，队列空了不乱跳本地歌单；同时用 `settle_before_play()` 消除「TTS 定时器 stop 收尾掐掉新歌」的竞态；实测 20 秒压缩验证：定时器到点 → 清明雨上（许嵩）→ 继续排下一首（17.0.8） |
+| v0.21 | 零安装：新增 `lib/runtime.js` 托管 xiaomusic（uv/python 建环境 → pip 装包 → 覆盖 vendor 补丁 → 生成配置 → 守护进程），不再需要 `start-xiaomusic.bat`；新增 `xm_setup` 工具做首次配置与自检；`baseUrl` 指向外部时自动降级为纯客户端。实测全新目录 6.2 秒完成安装+补丁+启动，接管已有安装时保留原 `music_path`/口令表（17.0.9） |
 

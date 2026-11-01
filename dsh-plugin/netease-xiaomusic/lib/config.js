@@ -12,6 +12,9 @@ import { join } from 'node:path'
 /** Where a cookie drops without ever entering a checked-in patch. */
 export const DEFAULT_COOKIE_FILE = join(homedir(), '.dsh', 'netease-music-u.txt')
 
+/** Where the managed xiaomusic install lives when the operator sets no `home`. */
+export const DEFAULT_XIAOMUSIC_HOME = join(homedir(), '.dsh', 'xiaomusic')
+
 /** @param {unknown} value @returns {Record<string, any>} */
 const obj = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {})
 
@@ -24,7 +27,7 @@ const num = (value, fallback) => (Number.isFinite(Number(value)) && Number(value
 /**
  * Project the row config into a usable settings object.
  * @param {unknown} raw config from `cordis.patch.yml`
- * @returns {{enabled: boolean, xiaomusic: {baseUrl: string, username: string, password: string}, defaultSpeaker: string, ncmCli: string, netease: {musicU: string, cookieFile: string, level: string}, timeouts: {ncmMs: number, xiaomusicMs: number}}}
+ * @returns {object} normalized settings
  */
 export function normalizeConfig(raw) {
   const r = obj(raw)
@@ -34,12 +37,37 @@ export function normalizeConfig(raw) {
   const vb = obj(r.voiceBridge)
   const q = obj(r.queue)
 
+  // A `baseUrl` with a host that is not this machine means the operator runs
+  // xiaomusic elsewhere, so the plugin must not start or patch a local copy.
+  const baseUrl = str(xm.baseUrl, '').replace(/\/+$/, '')
+  const external = Boolean(baseUrl) && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(baseUrl)
+  const port = num(xm.port, Number((baseUrl.match(/:(\d+)$/) || [])[1]) || 8090)
+
   return {
     enabled: r.enabled !== false,
     xiaomusic: {
-      baseUrl: str(xm.baseUrl, 'http://127.0.0.1:8090').replace(/\/+$/, ''),
-      username: str(xm.username),
+      // managed=false keeps the old behaviour: talk to a service someone else started.
+      managed: external ? false : xm.managed !== false,
+      baseUrl: baseUrl || `http://127.0.0.1:${port}`,
+      // Install directory for the managed runtime; its music and conf live here too.
+      // An empty string in the patch means "use the default", not "no directory".
+      home: str(xm.home) || DEFAULT_XIAOMUSIC_HOME,
+      version: str(xm.version, '0.6.1'),
+      pythonVersion: str(xm.pythonVersion, '3.12'),
+      // Explicit interpreter wins over the generated environment.
+      python: str(xm.python),
+      port,
+      // Speaker-facing host: the device downloads TTS audio from it, so it cannot
+      // be loopback. Empty means "detect the LAN address".
+      hostname: str(xm.hostname),
+      // Xiaomi account used by the managed runtime.
+      account: str(xm.account),
       password: str(xm.password),
+      miDid: str(xm.miDid),
+      startTimeoutMs: num(xm.startTimeoutMs, 120000),
+      // HTTP basic auth when talking to the API.
+      username: str(xm.username),
+      httpauthPassword: str(xm.httpauthPassword),
     },
     defaultSpeaker: str(r.defaultSpeaker),
     ncmCli: str(r.ncmCli, 'ncm-cli'),

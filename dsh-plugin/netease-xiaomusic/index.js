@@ -4,11 +4,15 @@
  * Search and version picking are delegated to `ncm-cli`; the playable URL comes
  * from NetEase's own player endpoint with the account cookie; playback is pushed
  * through xiaomusic, which owns the speaker.
+ *
+ * xiaomusic itself is a dependency of this plugin rather than something the user
+ * installs and launches: see `lib/runtime.js`.
  * @module @local/netease-xiaomusic
  */
 import { normalizeConfig } from './lib/config.js'
 import { createNcm } from './lib/ncm.js'
 import { createNetease } from './lib/netease.js'
+import { createRuntime } from './lib/runtime.js'
 import { createXiaomusic } from './lib/xiaomusic.js'
 import { createTools } from './lib/tools.js'
 import { createVoiceBridge } from './lib/bridge.js'
@@ -39,6 +43,7 @@ export function apply(ctx, config) {
   const netease = createNetease(cfg, logger)
   const xm = createXiaomusic(cfg, logger)
   const resolver = createResolver({ ncm, netease, logger })
+  const runtime = createRuntime({ cfg, logger, xm })
   const queue = createQueue({
     xm,
     netease,
@@ -53,16 +58,22 @@ export function apply(ctx, config) {
     },
   })
   const voice = createVoiceBridge({ cfg, ctx, logger, queue })
-  const tools = createTools({ cfg, ncm, netease, xm, logger, voice, queue, resolver })
+  const tools = createTools({ cfg, ncm, netease, xm, logger, voice, queue, resolver, runtime })
 
   for (const definition of tools) {
     ctx.effect(() => ctx.tools.register(definition))
   }
   ctx.effect(() => () => voice.close())
+  ctx.effect(() => () => runtime.close())
+
+  // Bring xiaomusic up in the background: installing a Python environment takes
+  // tens of seconds on a cold machine, and that must not hold the Host's load.
+  void runtime.start()
 
   logger?.info?.(
     `netease-xiaomusic: registered ${tools.length} tools ` +
-      `(ncm-cli ${ncm.entry ? 'resolved' : 'MISSING'}, xiaomusic ${cfg.xiaomusic.baseUrl}, ` +
+      `(ncm-cli ${ncm.entry ? 'resolved' : 'MISSING'}, xiaomusic ${cfg.xiaomusic.baseUrl} ` +
+      `${cfg.xiaomusic.managed ? `[managed: ${cfg.xiaomusic.home}]` : '[external]'}, ` +
       `cookie ${cfg.netease.musicU ? 'from env/config' : `file ${cfg.netease.cookieFile}`})`,
   )
 }

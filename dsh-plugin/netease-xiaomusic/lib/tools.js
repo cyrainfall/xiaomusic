@@ -7,6 +7,8 @@
  * @module netease-xiaomusic/tools
  */
 
+import { existsSync, writeFileSync } from 'node:fs'
+
 import { pickSong } from './resolve.js'
 
 /** @param {any} err @returns {string} */
@@ -33,6 +35,11 @@ const ERROR_TEXT = {
   XIAOMUSIC_TIMEOUT: 'xiaomusic 响应超时。',
   XIAOMUSIC_UNAUTHORIZED: 'xiaomusic 需要登录：请配置用户名密码，或在其设置里关闭 HTTP 认证。',
   XIAOMUSIC_HTTP_ERROR: 'xiaomusic 返回异常状态。',
+  RUNTIME_INSTALL_FAILED: 'xiaomusic 运行时装不上：请确认网络可用，或已安装 uv / Python 3.10+。',
+  RUNTIME_PATCH_FAILED: 'xiaomusic 装好了但补丁没覆盖上，语音转发用不了。',
+  RUNTIME_START_FAILED: 'xiaomusic 启动失败。',
+  RUNTIME_START_TIMEOUT: 'xiaomusic 启动超时：首次安装 Python 依赖可能较慢，稍后再试。',
+  PORT_BUSY: '端口被别的程序占用，xiaomusic 起不来：改 port 或先停掉占用者。',
   SPEAKER_NONE: 'xiaomusic 里没有任何音箱设备。',
   SPEAKER_NOT_FOUND: '没找到这台音箱，先用 speaker_list 看可用设备。',
   SPEAKER_PLAY_REJECTED: '音箱拒绝了这次推流。',
@@ -77,10 +84,27 @@ function songLine(song) {
 
 /**
  * Build every tool definition this plugin contributes.
- * @param {{cfg: object, ncm: object, netease: object, xm: object, logger?: object, voice?: object, queue?: object, resolver: object}} deps
+ * @param {{cfg: object, ncm: object, netease: object, xm: object, logger?: object, voice?: object, queue?: object, resolver: object, runtime?: object}} deps
  * @returns {object[]} raw JSON-Schema tool definitions
  */
-export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resolver }) {
+export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resolver, runtime }) {
+  /**
+   * Wait for the managed runtime before touching the API.
+   *
+   * On a fresh install the first call can arrive while `pip` is still working;
+   * answering "连不上 xiaomusic" in that window would be misleading, so the call
+   * waits for the runtime verdict instead of racing it.
+   * @param {number} [budgetMs]
+   * @returns {Promise<{ok: boolean, error?: string, detail?: string}>}
+   */
+  async function awaitRuntime(budgetMs = 90000) {
+    if (!runtime) return { ok: true }
+    const verdict = await Promise.race([
+      runtime.ready,
+      new Promise((done) => setTimeout(() => done({ ok: false, error: 'RUNTIME_START_TIMEOUT' }), budgetMs)),
+    ])
+    return verdict || { ok: true }
+  }
   /**
    * The voice request this tool call belongs to, if any.
    *
@@ -124,6 +148,81 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
 
   return [
     {
+      name: 'xm_setup',
+      timeoutMs: 180000,
+      description:
+        '查看/配置托管 xiaomusic 的运行状态：小米账号、网易云 cookie、服务是否就绪。' +
+        '首次使用必须先配小米账号（account + password），否则音箱列表是空的。' +
+        '不传任何参数时只报告状态。',
+      parameters: {
+        type: 'object',
+        properties: {
+          account: { type: 'string', description: '小米账号（手机号或邮箱），只在首次配置或更换账号时传' },
+          password: { type: 'string', description: '小米账号密码' },
+          miDid: { type: 'string', description: '默认音箱 did，多台音箱时用来固定默认设备' },
+          musicU: { type: 'string', description: '网易云 MUSIC_U cookie；也可以让它写到文件里，二选一' },
+          restart: { type: 'boolean', description: '改完配置后是否重启服务让其生效，默认 true' },
+        },
+        additionalProperties: false,
+      },
+      output: { schema: outputSchema, render },
+      async execute(args) {
+        const lines = []
+        const patch = {}
+        if (args?.account) patch.account = String(args.account).trim()
+        if (args?.password) patch.password = String(args.password)
+        if (args?.miDid) patch.mi_did = String(args.miDid).trim()
+
+        if (args?.musicU) {
+          // The cookie belongs in the file the resolver reads, not in config: it is
+          // a bearer credential and must stay replaceable without a restart.
+          try {
+            writeFileSync(cfg.netease.cookieFile, String(args.musicU).trim(), 'utf8')
+            lines.push(`已写入网易云 cookie：${cfg.netease.cookieFile}`)
+          } catch (err) {
+            lines.push(`写 cookie 失败：${messageOf(err)}`)
+          }
+        }
+
+        if (Object.keys(patch).length > 0) {
+          const written = runtime?.writeConfig?.(patch)
+          if (!written?.ok) return result(`写配置失败：${written?.detail || '未知原因'}`, true)
+          lines.push(`已写入配置：${written.files.join('、')}`)
+          if (args?.restart !== false) {
+            lines.push('正在重启 xiaomusic…')
+            const restarted = await runtime.restart()
+            lines.push(
+              restarted.ok
+                ? 'xiaomusic 已重启'
+                : `重启失败：${explain(restarted.error, restarted.detail)}`,
+            )
+          }
+        }
+
+        const boot = await awaitRuntime()
+        const state = runtime?.status?.() || {}
+        const head = [
+          `托管目录：${state.home || '(未配置)'}`,
+          `服务：${boot.ok ? `就绪 ${cfg.xiaomusic.baseUrl}` : `未就绪（${explain(boot.error, boot.detail)}）`}`,
+          `网易云 cookie：${cfg.netease.musicU ? '来自环境变量' : `文件 ${cfg.netease.cookieFile}${existsSync(cfg.netease.cookieFile) ? '（已配置）' : '（缺失）'}`}`,
+        ]
+
+        // Only report the account as "configured", never echo the secret.
+        if (boot.ok) {
+          const speakers = await xm.listSpeakers()
+          if (speakers.ok && speakers.items.length > 0) {
+            head.push(`音箱：${speakers.items.map((d) => `${d.name}(${d.did})`).join('、')}`)
+          } else if (speakers.ok) {
+            head.push('音箱：一台都没登录上来 —— 检查小米账号密码，或先扫码登录 xiaomusic 的 Web 界面')
+          } else {
+            head.push(`音箱：读取失败（${explain(speakers.error, speakers.detail)}）`)
+          }
+        }
+        return result([...head, ...lines].join('\n'))
+      },
+    },
+
+    {
       name: 'speaker_list',
       timeoutMs: 20000,
       description:
@@ -132,6 +231,8 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       output: { schema: outputSchema, render },
       async execute() {
+        const boot = await awaitRuntime()
+        if (!boot.ok) return result(explain(boot.error, boot.detail), true)
         const r = await xm.listSpeakers()
         if (!r.ok) return result(explain(r.error, r.detail), true)
         if (!r.items.length) return result('xiaomusic 里没有任何音箱设备。', true)
@@ -194,6 +295,8 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
       },
       output: { schema: outputSchema, render },
       async execute(args, exec) {
+        const boot = await awaitRuntime()
+        if (!boot.ok) return result(explain(boot.error, boot.detail), true)
         const speakerRef = String(args?.speaker ?? '')
         const target = await xm.resolveSpeaker(speakerRef, cfg.defaultSpeaker)
         if (!target.ok) return result(explain(target.error, target.detail), true)
@@ -321,6 +424,8 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
       },
       output: { schema: outputSchema, render },
       async execute(args) {
+        const boot = await awaitRuntime()
+        if (!boot.ok) return result(explain(boot.error, boot.detail), true)
         const action = String(args?.action ?? '')
         const target = await xm.resolveSpeaker(String(args?.speaker ?? ''), cfg.defaultSpeaker)
         if (!target.ok) return result(explain(target.error, target.detail), true)
@@ -356,6 +461,8 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
       },
       output: { schema: outputSchema, render },
       async execute(args) {
+        const boot = await awaitRuntime()
+        if (!boot.ok) return result(explain(boot.error, boot.detail), true)
         const target = await xm.resolveSpeaker(String(args?.speaker ?? ''), cfg.defaultSpeaker)
         if (!target.ok) return result(explain(target.error, target.detail), true)
         const device = target.device
@@ -406,6 +513,8 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
       async execute(args, exec) {
         const text = String(args?.text ?? '').trim()
         if (!text) return result('text 不能为空。', true)
+        const boot = await awaitRuntime()
+        if (!boot.ok) return result(explain(boot.error, boot.detail), true)
         const target = await xm.resolveSpeaker(String(args?.speaker ?? ''), cfg.defaultSpeaker)
         if (!target.ok) return result(explain(target.error, target.detail), true)
 

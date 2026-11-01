@@ -4,7 +4,16 @@
       config:
         enabled: true
         xiaomusic:
-          baseUrl: 'http://127.0.0.1:8090'
+          # 插件自带 xiaomusic：首次加载时自动装 Python 环境 + 补丁 + 启动服务，
+          # 不需要另外运行 start-xiaomusic.bat。
+          managed: true
+          home: ''          # 留空 => ~/.dsh/xiaomusic
+          version: '0.6.1'
+          port: 8090
+          hostname: ''      # 留空 => 自动探测局域网 IP（音箱要从这个地址取音频）
+          account: ''       # 小米账号；也可以用 xm_setup 工具配置
+          password: ''
+          miDid: ''
         ncmCli: 'ncm-cli'
         netease:
           musicU: ''
