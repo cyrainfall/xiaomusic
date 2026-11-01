@@ -178,3 +178,11 @@ reference/
 # 本地运行配置（每台机器不同）
 /config.json
 /.tmp/
+
+# local secrets and probe scratch
+config.md
+.tmp-probe/
+
+# 上面的 lib/ 是 Python 打包产物规则，别把插件源码一起忽略掉
+!dsh-plugin/netease-xiaomusic/lib/
+!dsh-plugin/netease-xiaomusic/lib/**

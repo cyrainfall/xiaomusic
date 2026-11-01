@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 import aiohttp
 
 from xiaomusic import __version__
+from xiaomusic.agent_bridge import AgentBridge
 from xiaomusic.analytics import Analytics
 from xiaomusic.auth import AuthManager
 from xiaomusic.command_handler import CommandHandler
@@ -71,6 +72,9 @@ class XiaoMusic:
 
         # 初始化日志
         self.setup_logger()
+
+        # 大模型语音桥接（DSH 插件侧负责搜歌与直链解析）
+        self.agent_bridge = AgentBridge(lambda: self.config, self.log)
 
         # 计划任务
         self.crontab = Crontab(self.log)
@@ -307,7 +311,21 @@ class XiaoMusic:
     async def play_url(self, did="", arg1="", **kwargs):
         self.log.info(f"手动推送链接：{arg1}")
         url = arg1
-        return await self.device_manager.devices[did].group_player_play(url)
+        device = self.device_manager.devices.get(did)
+        if device is None:
+            return None
+        if url:
+            # 记住这条推流：TTS 打断后要用它恢复播放
+            device._pushed_url = url
+        # TTS 定时器触发的 stop 可能还在收尾，等它结束再推，免得刚播就被掐
+        await device.settle_before_play()
+        result = await device.group_player_play(url)
+        # 外部流播完后没人接手：按歌曲时长起一个「下一首」定时器，
+        # 到点后 device 会先问插件队列，队列空了才回落本地列表。
+        duration = int(kwargs.get("duration") or 0)
+        if url and duration > 0:
+            await device.set_next_music_timeout(duration + self.config.delay_sec)
+        return result
 
     # 口令:单曲循环
     async def set_play_type_one(self, did="", **kwargs):
@@ -573,6 +591,9 @@ class XiaoMusic:
 
     # 口令:停止
     async def stop(self, did="", arg1="", **kwargs):
+        bridge = getattr(self, "agent_bridge", None)
+        if bridge is not None:
+            bridge.disarm(did)
         return await self.device_manager.devices[did].stop(arg1=arg1)
 
     # 口令:分钟后关机

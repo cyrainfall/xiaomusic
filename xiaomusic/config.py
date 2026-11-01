@@ -50,6 +50,32 @@ KEY_WORD_ARG_BEFORE_DICT = {
 }
 
 
+# 大模型语音桥接的默认播放意图正则
+def default_agent_bridge_patterns():
+    return [
+        r"^(播放|放一首|放点|放个|来一首|来点|来段|我想听|想听|换一首|换一个|再放|再来一首|听一下|听首|整一首|搜一下).*",
+    ]
+
+
+# 命中这些 opvalue 时保持本地执行，不进大模型
+def default_agent_bridge_passthrough():
+    return [
+        "play_next",
+        "play_prev",
+        "play_music_list",
+        "play_music_list_index",
+        "set_play_type_one",
+        "set_play_type_all",
+        "set_play_type_rnd",
+        "set_play_type_sin",
+        "set_play_type_seq",
+        "set_volume",
+        "stop",
+        "stop_after_minute",
+        "gen_music_list",
+    ]
+
+
 # 口令匹配优先级
 def default_key_match_order():
     return [
@@ -203,6 +229,24 @@ class Config:
     enable_pull_ask: bool = (
         os.getenv("XIAOMUSIC_ENABLE_PULL_ASK", "false").lower() == "true"
     )
+    # 大模型语音桥接：播放类口令转发给 DSH 插件（插件负责 ncm-cli 搜歌 + 直链）
+    enable_agent_bridge: bool = (
+        os.getenv("XIAOMUSIC_ENABLE_AGENT_BRIDGE", "false").lower() == "true"
+    )
+    agent_bridge_url: str = os.getenv(
+        "XIAOMUSIC_AGENT_BRIDGE_URL", "http://127.0.0.1:3071/ask"
+    )
+    agent_bridge_token: str = os.getenv("XIAOMUSIC_AGENT_BRIDGE_TOKEN", "")
+    agent_bridge_timeout: int = int(os.getenv("XIAOMUSIC_AGENT_BRIDGE_TIMEOUT", "35"))
+    # play_intent=播放类优先转发且未命中兜底；fallback=仅未命中转发；always=全部转发
+    agent_bridge_when: str = os.getenv("XIAOMUSIC_AGENT_BRIDGE_WHEN", "play_intent")
+    agent_bridge_play_patterns: list[str] = field(
+        default_factory=default_agent_bridge_patterns
+    )
+    agent_bridge_passthrough: list[str] = field(
+        default_factory=default_agent_bridge_passthrough
+    )
+    agent_bridge_tts: str = os.getenv("XIAOMUSIC_AGENT_BRIDGE_TTS", "好的，正在找歌")
     auto_convert: bool = False
     crontab_json: str = os.getenv("XIAOMUSIC_CRONTAB_JSON", "")  # 定时任务
     enable_yt_dlp_cookies: bool = (

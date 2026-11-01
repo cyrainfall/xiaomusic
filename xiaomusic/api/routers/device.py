@@ -99,13 +99,17 @@ async def cmd_status():
 
 
 @router.get("/playurl")
-async def playurl(did: str, url: str):
-    """播放 URL"""
+async def playurl(did: str, url: str, duration: int = 0):
+    """播放 URL
+
+    duration: 可选，单位秒；外部流不在 xiaomusic 的播放列表里，
+    没有时长就没法安排「播完接下一首」的定时器。
+    """
     if not xiaomusic.did_exist(did):
         return {"ret": "Did not exist"}
     decoded_url = urllib.parse.unquote(url)
-    log.info(f"playurl did: {did} url: {decoded_url}")
-    return await xiaomusic.play_url(did=did, arg1=decoded_url)
+    log.info(f"playurl did: {did} duration: {duration} url: {decoded_url}")
+    return await xiaomusic.play_url(did=did, arg1=decoded_url, duration=duration)
 
 
 @router.get("/playtts")
