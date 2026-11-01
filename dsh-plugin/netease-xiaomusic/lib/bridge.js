@@ -30,6 +30,37 @@ function trace(line) {
 /** Tools a voice turn may use. Anything else is refused outright. */
 export const MUSIC_TOOLS = ['speaker_list', 'ncm_search', 'ncm_play', 'ncm_control', 'ncm_status', 'speaker_say']
 
+/**
+ * Utterances this plugin must never answer, whatever the model decides.
+ *
+ * The prompt already tells the model to hand non-music back, but a turn that
+ * ends in `speaker_say` would still take over the request: xiaomusic has by then
+ * stopped the speaker's own answer, so the user's alarm never gets set. This is
+ * the deterministic backstop — cheap, and it only ever drops chat replies, never
+ * playback.
+ */
+const NON_MUSIC = [
+  /(闹钟|叫我起床|叫我|喊我|叫醒|起床|提醒我|提醒一下|备忘|日程|倒计时|计时器)/,
+  /(天气|下雨|下雪|气温|空气质量|雾霾|风力|紫外线)/,
+  /(几点|什么时间|几号|星期几|礼拜几|农历|节气)/,
+  /(新闻|股票|基金|汇率|彩票|限号|油价|金价|股价)/,
+  /(开灯|关灯|灯光|亮度|调亮|调暗|空调|风扇|窗帘|插座|扫地|加湿|净化器|电视机|投影)/,
+  /(打开|关闭|关掉|开一下|关一下).{0,6}(灯|空调|风扇|窗帘|插座|电视|投影|空气|热水器|加湿|净化)/,
+  /(打电话|拨号|发消息|发微信|发短信|导航|打车|叫车|外卖|快递|购物|下单)/,
+  /(翻译|算一下|计算|等于几|笑话|讲故事|成语|古诗|百科|你是谁|你叫什么|几岁)/,
+]
+
+/** @param {string} query */
+export function isNonMusic(query) {
+  const q = String(query ?? '').trim()
+  if (!q) return false
+  // 「播放起床闹铃」既像闹钟又像点歌：点了歌就是点歌
+  if (/^(播放|放一首|放首|放点|放个|来一首|来点|来段|来首歌|我想听|想听|换一首|换一个|再放|再来一首|听一下|听首|听歌|整一首|点歌|唱首|唱一首|搜一下|找一下)/.test(q)) {
+    return false
+  }
+  return NON_MUSIC.some((re) => re.test(q))
+}
+
 /** Reset a speaker's session once it has served this many turns. */
 const MAX_TURNS = 50
 
@@ -116,6 +147,12 @@ export function createVoiceBridge({ cfg, ctx, logger, queue }) {
 
   /**
    * Build the model-facing prompt for one utterance.
+   *
+   * Segment 1 decides whether this plugin owns the turn at all. Anything outside
+   * music — an alarm, the weather, a timer, a light — must be reported as
+   * `handled=false` so xiaomusic falls through and lets the speaker's own
+   * assistant answer. Speaking instead (`speaker_say`) would take the request
+   * over and silence the answer the user actually wanted.
    * @param {{query: string, deviceName: string}} input
    */
   function promptFor({ query, deviceName }) {
@@ -123,13 +160,21 @@ export function createVoiceBridge({ cfg, ctx, logger, queue }) {
       `[来自小爱音箱的语音] 设备：${deviceName || '小爱音箱'}。`,
       `用户说：「${query}」`,
       '这句话是语音识别结果，可能有错别字或语气词。',
-      '判断顺序：',
-      '1. 想听歌（说了歌名、歌手、或"来点/放点/听点+某样东西"）→ 立刻调用一次 ncm_play，keyword 原样传用户说的内容。',
-      '   例：「播放许嵩的歌」→ ncm_play(keyword="许嵩的歌")；「来点周杰伦」→ ncm_play(keyword="周杰伦")；',
-      '   「放首素颜」→ ncm_play(keyword="素颜")。工具自己会搜索、会按歌手取歌、会选版本，不需要你先搜索。',
-      '2. 停 / 下一首 / 上一首 / 音量 → ncm_control。',
-      '3. 只有在问"在放什么"时才用 ncm_status。',
-      '4. 只有整句话里完全听不出任何歌名或歌手时，才用 speaker_say 请用户再说一遍。',
+      '第一步：判断这是不是「音乐」请求。只有下面这些算：',
+      '  A. 想听歌（说了歌名、歌手，或"来点/放点/听点+某样东西"）；',
+      '  B. 控制播放（停 / 下一首 / 上一首 / 音量 / 单曲循环…）；',
+      '  C. 问当前播放（"在放什么""这歌叫什么"）。',
+      '只要不是 A/B/C，例如设闹钟、提醒、起床、天气、时间、灯和家电、导航、',
+      '闲聊、问你是谁、讲故事 —— 这类根本不该由你处理：**一个工具都不要调用，',
+      '也不要说话，直接结束**。系统会把这句话交还给音箱自己的语音助手，',
+      '这才是用户想要的（你开口反而会打断小爱的正确回答）。',
+      '第二步：如果是 A/B/C，按下面来：',
+      '  1. 想听歌（说了歌名、歌手、或"来点/放点/听点+某样东西"）→ 立刻调用一次 ncm_play，keyword 原样传用户说的内容。',
+      '     例：「播放许嵩的歌」→ ncm_play(keyword="许嵩的歌")；「来点周杰伦」→ ncm_play(keyword="周杰伦")；',
+      '     「放首素颜」→ ncm_play(keyword="素颜")。工具自己会搜索、会按歌手取歌、会选版本，不需要你先搜索。',
+      '  2. 停 / 下一首 / 上一首 / 音量 → ncm_control。',
+      '  3. 只有在问"在放什么"时才用 ncm_status。',
+      '  4. 只有确认是音乐请求、但整句话里完全听不出任何歌名或歌手时，才用 speaker_say 请用户再说一遍。',
       '说了歌手就算说清楚了：**不要反问"想听哪一首"，不要说"没听清"**。',
       '最多两次工具调用；不要输出 Markdown，不要解释工具。',
     ].join('\n')
@@ -179,8 +224,10 @@ export function createVoiceBridge({ cfg, ctx, logger, queue }) {
             order: agentCtx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
             text:
               '你是小爱音箱的音乐助手。用户的话来自音箱语音识别，可能有错别字或语气词。' +
-              '只在音乐范围内行动：播放用 ncm_play（它自己会搜索、按歌手取歌、选版本），' +
+              '**你只处理音乐**：播放用 ncm_play（它自己会搜索、按歌手取歌、选版本），' +
               '搜歌用 ncm_search，控制用 ncm_control，查询用 ncm_status，需要说话用 speaker_say。' +
+              '设闹钟、提醒、起床、天气、时间、灯和家电、导航、闲聊这些都不归你管：' +
+              '遇到就一个工具都不调用、也不说话，直接结束，让音箱自己的助手去回答。' +
               '用户说「播放某歌手的歌」时直接调用 ncm_play，不要说没听清、不要反问想听哪一首。' +
               '回复简短、口语化，不要输出 Markdown。',
           })
@@ -268,6 +315,13 @@ export function createVoiceBridge({ cfg, ctx, logger, queue }) {
         }
       }
       if (slot.box.speak) {
+        // Backstop for the non-music rule above: a chat reply to an alarm/weather
+        // utterance must not take the turn over. Playback is never dropped here.
+        if (isNonMusic(req.query)) {
+          trace(`drop speak for non-music ${JSON.stringify(req.query)}: ${slot.box.speak}`)
+          logger?.info?.(`netease-xiaomusic: 非音乐口令交还小爱 ${JSON.stringify(req.query)}`)
+          return { handled: false, reason: 'not music', elapsedMs }
+        }
         return { handled: true, action: 'chat', speak: slot.box.speak, elapsedMs }
       }
       return {

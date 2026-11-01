@@ -555,9 +555,59 @@ def is_play_intent(self, query: str) -> bool:
 | --- | --- | --- | --- |
 | 1 | `ctrl_panel=True`（Web 控制面板） | 原逻辑 | 页面里点播放 |
 | 2 | 关键词命中且 `opvalue ∈ passthrough` | 原逻辑 | 「下一首」「播放列表第 3 首」「音量 30」 |
-| 3 | 播放类正则命中 | **大模型** | 「播放稻香」「来点周杰伦」「换个版本」「我想听点安静的」 |
-| 4 | 未命中（`play_intent`/`fallback`） | **大模型** | 「小爱，整点活儿」 |
-| 5 | 其余命中 | 原逻辑 | 「分钟后关机」「加入收藏」 |
+| 3 | 播放类 / 问歌正则命中 | **大模型** | 「播放稻香」「来点周杰伦」「换个版本」「在放什么」 |
+| 4 | 非音乐正则命中（且未命中 3） | **小爱自己** | 「六点二十叫我起床」「明天天气」「开灯」 |
+| 5 | 提到音乐但没动词（且未命中 4） | **大模型** | 「许嵩的歌」 |
+| 6 | 其余未命中，仅 `when=fallback` 时 | **大模型** | 「小爱，整点活儿」 |
+| 7 | 其余命中 | 原逻辑 | 「分钟后关机」「加入收藏」 |
+
+#### 7.3.1 非音乐口令必须放行（v0.22 修正）
+
+首版把「未命中口令」整段兜底给大模型（`agent_bridge_when=play_intent` 时也兜底），
+结果是**任何一句语音都会被接管**：
+
+```
+「六点二十叫我起床」→ 未命中关键词 → 兜底转发
+  → group_force_stop_xiaoai()          # 先掐掉小爱正要说的「好的，已定好闹钟」
+  → do_tts("好的，正在找歌")            # 再念一句找歌
+  → 模型：speaker_say("抱歉，我只能帮你放歌…")
+  → 闹钟没设成，用户听到的是道歉
+```
+
+小爱自带的能力（闹钟、天气、时间、家电、闲聊）**必须留在音箱自己手里**。
+修法是加一道确定性硬闸，并取消无条件兜底：
+
+```python
+# 1) 非音乐口令：直接 return，不掐小爱、不念 TTS、不问大模型
+if self.is_passthrough_to_xiaoai(query, opvalue, ctrl_panel):
+    self.log.info(f"非音乐口令，交还小爱: {query!r}")
+    return
+
+# 2) 兜底只在显式配置时发生
+when = getattr(self.config, "agent_bridge_when", "play_intent")
+return not opvalue and when == "fallback"
+```
+
+三个新配置项（都有默认值，老配置文件不受影响）：
+
+| 配置 | 作用 | 例子 |
+| --- | --- | --- |
+| `agent_bridge_non_music_patterns` | 命中即永不接管 | 闹钟 / 叫我起床 / 天气 / 几点 / 开灯 / 讲笑话 |
+| `agent_bridge_query_patterns` | 「问歌」也算音乐意图 | 「在放什么」「这首歌叫什么」 |
+| `agent_bridge_music_patterns` | 句子里提到音乐就交给大模型 | 「许嵩的歌」（没有播放动词） |
+
+另有两处配套修正：
+
+- `parse_stop_delay()` 的关闭动词后只允许「音乐/播放/了/吧」收尾，否则
+  「半**个小时后关闭**叫我起床」会被误判成延时关机，把闹钟吞掉；
+- `delegate_to_agent()` 只在**点歌**时念「好的，正在找歌」，问「在放什么」
+  不该先来一句找歌。
+
+插件侧（`lib/bridge.js`）另有两道保险：提示词先判「是不是音乐请求」，
+不是就一个工具都不调、直接结束；万一模型仍用 `speaker_say` 应答，
+`isNonMusic()` 会把这条 chat 结果丢掉（`handled=false`），播放结果从不受影响。
+
+回归用例见 `test/test_non_music_routing.py`（在修好前的代码上会挂 8 条）。
 
 注意 `播放列表第 3 首` 同时命中「播放」正则与 `play_music_list_index`，靠优先级 2 保持本地执行——这是这张表存在的唯一原因。
 
@@ -1298,3 +1348,4 @@ strict-peer-dependencies=false     # 让缺失 peer 降级为 warning
 | v0.20 | 修「播完没有下一首」：外部推流没有时长、xiaomusic 不会排下一首；插件随 `/playurl` 带 `durationSec`，xiaomusic 据此排定时器，到点走 `_play_from_agent_queue()` 回插件队列接力，队列空了不乱跳本地歌单；同时用 `settle_before_play()` 消除「TTS 定时器 stop 收尾掐掉新歌」的竞态；实测 20 秒压缩验证：定时器到点 → 清明雨上（许嵩）→ 继续排下一首（17.0.8） |
 | v0.21 | 零安装：新增 `lib/runtime.js` 托管 xiaomusic（uv/python 建环境 → pip 装包 → 覆盖 vendor 补丁 → 生成配置 → 守护进程），不再需要 `start-xiaomusic.bat`；新增 `xm_setup` 工具做首次配置与自检；`baseUrl` 指向外部时自动降级为纯客户端。实测全新目录 6.2 秒完成安装+补丁+启动，接管已有安装时保留原 `music_path`/口令表（17.0.9） |
 
+| v0.22 | 修「非音乐对话也被 xiaomusic 接管」：「六点二十叫我起床」原本走未命中兜底进大模型，xiaomusic 先掐掉小爱的应答、再让模型用 TTS 道歉，闹钟没设成。现在 `is_passthrough_to_xiaoai()` 把闹钟/天气/时间/家电/闲聊直接放行给小爱（不掐、不念 TTS、不转发），兜底改为只在 `agent_bridge_when=fallback` 时生效；新增 `agent_bridge_non_music_patterns` / `agent_bridge_query_patterns` / `agent_bridge_music_patterns`；`parse_stop_delay` 不再把「半个小时后关闭叫我起床」当延时关机；插件侧提示词先判音乐意图，并用 `isNonMusic()` 兜底丢弃非音乐的 chat 回复（17.0.10）|

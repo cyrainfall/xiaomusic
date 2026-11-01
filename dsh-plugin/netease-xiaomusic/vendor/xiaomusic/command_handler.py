@@ -86,6 +86,13 @@ class CommandHandler:
                 if await self.advance_agent_queue(did, device, opvalue):
                     return
 
+            # 明确的非音乐口令（闹钟/天气/时间/家电/闲聊…）：不归 xiaomusic 管。
+            # 直接放行，让音箱自己的语音助手接着答 —— 这里绝不能
+            # `group_force_stop_xiaoai()`，否则小爱的「好的，已定好闹钟」会被掐掉。
+            if self.is_passthrough_to_xiaoai(query, opvalue, ctrl_panel):
+                self.log.info(f"非音乐口令，交还小爱: {query!r}")
+                return
+
             # 播放类口令优先交给大模型（见 agent_bridge.py）；失败则回落原逻辑
             if self.should_delegate(query, opvalue, ctrl_panel):
                 if await self.delegate_to_agent(did, device, query):
@@ -116,14 +123,24 @@ class CommandHandler:
 
         支持：半小时 / 半个小时 / 1小时 / 一个小时 / 两小时 / 30分钟 / 十分钟，
         后面跟「后/以后/之后」以及关闭类动词（关闭音乐、关掉、停止、关机）。
+
+        关闭动词后面只允许跟「音乐/播放/了/吧」这类收尾词。否则
+        「半个小时后关闭叫我起床」会被误判成延时关机 —— 用户要的是闹钟，
+        不是关机，被 xiaomusic 吞掉就等于闹钟没设成。
         """
         q = (query or "").strip()
         if not q:
             return None
 
+        # 带闹钟/提醒意图的句子一律不碰：那是小爱自己的事
+        bridge = getattr(self.xiaomusic, "agent_bridge", None)
+        if bridge is not None and bridge.is_non_music_intent(q):
+            return None
+
         pattern = (
             r"(半|[\d零一二两三四五六七八九十百]+)\s*(?:个)?\s*(小时|分钟)"
             r"\s*(?:以后|之后|后)\s*(?:关闭|关掉|停止|关|关机)"
+            r"\s*(?:音乐|歌曲|播放|小爱)?\s*[了吧啊哦呀。！!.，,~]*\s*$"
         )
         match = re.search(pattern, q)
         if not match:
@@ -258,13 +275,36 @@ class CommandHandler:
         )
         return True
 
+    def is_passthrough_to_xiaoai(self, query, opvalue, ctrl_panel):
+        """这条口令是不是「跟音乐无关、应该让小爱自己答」。
+
+        只有同时满足下面几点才算：不是控制面板输入、没命中任何口令、
+        没有播放/问歌意图、且命中了非音乐词表（闹钟/天气/时间/家电/闲聊…）。
+
+        命中后 xiaomusic 什么都不做：不掐小爱、不念 TTS、不问大模型。
+        """
+        if ctrl_panel or opvalue:
+            return False
+
+        bridge = getattr(self.xiaomusic, "agent_bridge", None)
+        if bridge is None:
+            return False
+        if bridge.is_play_intent(query) or bridge.is_query_intent(query):
+            return False
+        return bridge.is_non_music_intent(query)
+
     def should_delegate(self, query, opvalue, ctrl_panel):
         """这条口令是否该交给大模型处理。
 
         优先级（高→低）：
         1. 确定性控制口令（下一首/音量/歌单…） —— 不进大模型
-        2. 命中播放意图正则 —— 进大模型（控制面板输入同样适用）
-        3. 未命中任何口令且 agent_bridge_when 允许 —— 兜底进大模型
+        2. 明确命中播放 / 问歌意图 —— 进大模型（控制面板输入同样适用）
+        3. 明确的非音乐口令（闹钟/提醒/天气/时间/家电/闲聊…） —— 永不接管
+        4. 其余未命中口令 —— 只在 agent_bridge_when="fallback" 时兜底
+
+        第 3 条是硬闸：小爱自带的能力（设闹钟、报天气、开关灯）一旦被转发，
+        xiaomusic 会先 `group_force_stop_xiaoai()` 掐掉小爱的回答，用户的闹钟
+        也就设不成了。所以「非音乐对话不接管」不能靠大模型自觉，必须在这里挡。
         """
         bridge = getattr(self.xiaomusic, "agent_bridge", None)
         if bridge is None or not bridge.is_enabled():
@@ -274,14 +314,26 @@ class CommandHandler:
         if opvalue and opvalue in passthrough:
             return False
 
-        if bridge.is_play_intent(query):
+        # 2. 播放 / 问歌意图优先：「播放起床闹铃」点了歌就是点歌
+        if bridge.is_play_intent(query) or bridge.is_query_intent(query):
             return True
 
         # 控制面板是人在页面上点/敲的，其余情况保持原来的确定性行为
         if ctrl_panel:
             return False
 
+        # 3. 明确的非音乐口令：不接管，留给小爱自己回答
+        if bridge.is_non_music_intent(query):
+            return False
+
+        # 4. 没命中口令、但句子里提到了音乐（「许嵩的歌」）：交给大模型
+        if not opvalue and bridge.mentions_music(query):
+            return True
+
+        # 5. 其余情况看配置：默认只接播放意图，不再无条件兜底
         when = getattr(self.config, "agent_bridge_when", "play_intent")
+        if when == "always":
+            return True
         return not opvalue and when in ("play_intent", "fallback")
 
     async def delegate_to_agent(self, did, device, query):
@@ -291,10 +343,11 @@ class CommandHandler:
             return False
 
         try:
-            # 先停掉小爱自己的回答，再播一句过渡语，掩盖模型往返的延迟
+            # 先停掉小爱自己的回答，再播一句过渡语，掩盖模型往返的延迟。
+            # 过渡语只在「点歌」时说；问「在放什么」不该先来一句「正在找歌」。
             await device.group_force_stop_xiaoai()
             tts_text = getattr(self.config, "agent_bridge_tts", "")
-            if tts_text:
+            if tts_text and bridge.is_play_intent(query):
                 await self.xiaomusic.do_tts(did, tts_text)
 
             playing = None

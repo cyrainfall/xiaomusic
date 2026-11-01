@@ -47,15 +47,40 @@ class AgentBridge:
 
     def is_play_intent(self, query: str) -> bool:
         """是否是「想听歌」类口令（命中配置的正则即算）。"""
+        return self._match_any(query, "agent_bridge_play_patterns")
+
+    def is_query_intent(self, query: str) -> bool:
+        """是否在问「在放什么 / 这歌叫什么」——也算音乐意图。"""
+        return self._match_any(query, "agent_bridge_query_patterns")
+
+    def mentions_music(self, query: str) -> bool:
+        """整句里有没有提到音乐（歌/曲/音乐/歌手/唱…）。
+
+        用来兜住「许嵩的歌」这种没有播放动词、但明显是想听歌的说法。
+        """
+        return self._match_any(query, "agent_bridge_music_patterns")
+
+    def is_non_music_intent(self, query: str) -> bool:
+        """是否是明确的非音乐口令（闹钟、天气、时间、智能家居、闲聊…）。
+
+        这类必须留给小爱自己处理：转发给大模型后 xiaomusic 会先
+        `group_force_stop_xiaoai()` 掐掉小爱的回答，闹钟就设不成了。
+        「播放起床闹铃」这种既像播放又像闹钟的，仍按播放处理（见调用方顺序）。
+        """
+        if self._match_any(query, "agent_bridge_query_patterns"):
+            return False
+        return self._match_any(query, "agent_bridge_non_music_patterns")
+
+    def _match_any(self, query: str, key: str) -> bool:
         q = (query or "").strip()
         if not q:
             return False
-        for pattern in getattr(self.config, "agent_bridge_play_patterns", []) or []:
+        for pattern in getattr(self.config, key, []) or []:
             try:
-                if re.match(pattern, q):
+                if re.search(pattern, q):
                     return True
             except re.error:
-                self.log.warning(f"agent_bridge: 非法的播放意图正则 {pattern!r}")
+                self.log.warning(f"agent_bridge: 非法的正则 {key}={pattern!r}")
         return False
 
     async def ask(self, did: str, query: str, device=None, playing=None):

@@ -53,7 +53,39 @@ KEY_WORD_ARG_BEFORE_DICT = {
 # 大模型语音桥接的默认播放意图正则
 def default_agent_bridge_patterns():
     return [
-        r"^(播放|放一首|放点|放个|来一首|来点|来段|我想听|想听|换一首|换一个|再放|再来一首|听一下|听首|整一首|搜一下).*",
+        r"^(播放|放一首|放首|放点|放个|来一首|来点|来段|来首歌|我想听|想听|换一首|换一个|再放|再来一首|听一下|听首|听歌|整一首|点歌|唱首|唱一首|搜一下|找一下).*",
+        r"^(换个|换一个|放|来|听|点|搜|找)\S*(歌|曲|音乐|专辑|歌手|伴奏|live|版)",
+    ]
+
+
+# 大模型语音桥接的默认「问歌」正则：问在放什么也算音乐意图
+def default_agent_bridge_query_patterns():
+    return [
+        r"^(在放什么|放的什么|放的是什么|这是什么歌|这首歌叫什么|这歌叫什么|谁唱的|什么歌|现在放的|下一首是什么).*",
+    ]
+
+
+# 句子里「提到音乐」的痕迹：没有动词的「许嵩的歌」也算想听歌
+def default_agent_bridge_music_patterns():
+    return [
+        r"(歌|曲|音乐|专辑|歌手|唱|伴奏|旋律|BGM|dj|DJ|live|remix|版)",
+    ]
+
+
+# 明确的非音乐口令：命中即永不接管（闹钟/提醒/天气/时间/智能家居/闲聊…）
+# 小爱自带的能力（设闹钟、报天气、控制家电）必须留在小爱自己手里：
+# 一旦转发给大模型，xiaomusic 会先掐掉小爱的回答，闹钟也就设不成了。
+def default_agent_bridge_non_music_patterns():
+    return [
+        r"(闹钟|叫我起床|叫我|喊我|叫醒|起床|提醒我|提醒一下|备忘|日程|倒计时|计时器|定时关闭小爱)",
+        r"(天气|下雨|下雪|气温|温度|穿什么|空气质量|雾霾|风力|紫外线)",
+        r"(几点|现在时间|什么时间|几号|星期几|礼拜几|农历|节气)",
+        r"(新闻|股票|基金|汇率|彩票|限号|油价|金价|股价)",
+        r"(开灯|关灯|灯光|亮度|调亮|调暗|空调|风扇|窗帘|插座|扫地|加湿|净化器|电视机|投影)",
+        r"(打开|关闭|关掉|开一下|关一下).{0,6}(灯|空调|风扇|窗帘|插座|电视|投影|空气|热水器|加湿|净化)",
+        r"(打电话|拨号|发消息|发微信|发短信|导航|打车|叫车|外卖|快递|购物|下单)",
+        r"(翻译|算一下|计算|等于几|笑话|讲故事|成语|古诗|百科|你是谁|你叫什么|几岁)",
+        r"(音量|声音|喇叭|音响|静音点|大声点|小声点)",
     ]
 
 
@@ -239,9 +271,19 @@ class Config:
     agent_bridge_token: str = os.getenv("XIAOMUSIC_AGENT_BRIDGE_TOKEN", "")
     agent_bridge_timeout: int = int(os.getenv("XIAOMUSIC_AGENT_BRIDGE_TIMEOUT", "35"))
     # play_intent=播放类优先转发且未命中兜底；fallback=仅未命中转发；always=全部转发
+    # 注意：无论取何值，命中 agent_bridge_non_music_patterns 的口令都不转发
     agent_bridge_when: str = os.getenv("XIAOMUSIC_AGENT_BRIDGE_WHEN", "play_intent")
     agent_bridge_play_patterns: list[str] = field(
         default_factory=default_agent_bridge_patterns
+    )
+    agent_bridge_query_patterns: list[str] = field(
+        default_factory=default_agent_bridge_query_patterns
+    )
+    agent_bridge_music_patterns: list[str] = field(
+        default_factory=default_agent_bridge_music_patterns
+    )
+    agent_bridge_non_music_patterns: list[str] = field(
+        default_factory=default_agent_bridge_non_music_patterns
     )
     agent_bridge_passthrough: list[str] = field(
         default_factory=default_agent_bridge_passthrough
