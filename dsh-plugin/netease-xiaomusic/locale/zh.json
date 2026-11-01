@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "网易云点歌（小爱音箱）",
+    "description": "让小爱音箱播放网易云音乐：ncm-cli 负责搜歌与选版本，账号 cookie 解析直链，xiaomusic 推流到音箱。"
+  }
+}

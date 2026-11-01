@@ -1,0 +1,11 @@
+- insert:
+    - id: netease-xiaomusic
+      name: '@local/netease-xiaomusic'
+      config:
+        enabled: true
+        xiaomusic:
+          baseUrl: 'http://127.0.0.1:8090'
+        ncmCli: 'ncm-cli'
+        netease:
+          musicU: ''
+          level: 'exhigh'

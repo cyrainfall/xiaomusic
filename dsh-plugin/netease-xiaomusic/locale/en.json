@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "NetEase Music on Xiaomi Speaker",
+    "description": "Play NetEase Cloud Music on a Xiaomi speaker: ncm-cli searches and picks the version, the account cookie resolves the stream, xiaomusic pushes it to the device."
+  }
+}

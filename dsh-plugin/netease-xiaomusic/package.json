@@ -1,0 +1,31 @@
+{
+  "name": "@local/netease-xiaomusic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Play NetEase Cloud Music on Xiaomi speakers through xiaomusic: ncm-cli picks the song, an account cookie resolves the stream, xiaomusic pushes it to the speaker.",
+  "license": "MIT",
+  "main": "./index.js",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*": "./locale/*",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "locale/",
+    "icon.svg",
+    "cordis.patch.yml"
+  ]
+}
