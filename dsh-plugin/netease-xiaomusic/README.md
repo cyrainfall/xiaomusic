@@ -38,9 +38,15 @@ ncm-cli login --background      # 扫码登录网易云
 | `speaker_list` | 列出音箱（did / 名称 / 型号 / 在线） |
 | `ncm_search` | 搜歌，返回可播候选与两种 ID |
 | `ncm_play` | 播放（`keyword` 或 `encryptedId`+`originalId`），推流后回读设备状态 |
+| `ncm_recommend` | 「播放音乐」这类没点名具体歌的请求：拉**每日推荐 30 首**整队列播放 |
 | `ncm_control` | `stop` / `next` / `prev` / `volume` |
 | `ncm_status` | 当前在放什么（以设备状态为准） |
 | `speaker_say` | TTS 播报 |
+
+只说「播放音乐」，不说歌名歌手时，走 `ncm_recommend`：拉账号的网易云「每日推荐」
+（默认 30 首）一次性排进队列，从第一首开始放，「下一首」就在这 30 首里接着走。
+`ncm_play` 收到「播放音乐」「放点歌」这种泛词也会自动转过去，不会再拿它当歌名搜。
+没有 cookie 或每日推荐取不到时，退回公开热歌榜，不至于一句话下去没反应。
 
 ## 配置项（row config）
 

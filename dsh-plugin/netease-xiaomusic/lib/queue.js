@@ -73,7 +73,10 @@ export function createQueue({ xm, netease, logger, cfg, refill }) {
    */
   function record(did, input) {
     cancelTimer(did)
-    const raw = Array.isArray(input.items) && input.items.length > 0 ? input.items.slice(0, 20) : input.song ? [input.song] : []
+    // 60 is the ceiling because the largest list this plugin hands over is a
+    // 30-song daily mix (and a search never returns more than 50); capping at 20
+    // silently cut a 「播放音乐」 queue short after the 20th track.
+    const raw = Array.isArray(input.items) && input.items.length > 0 ? input.items.slice(0, 60) : input.song ? [input.song] : []
     const items = distinctTitles(raw)
     if (items.length === 0) return
 

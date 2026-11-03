@@ -102,6 +102,50 @@ export function scoreSong(song, q) {
 }
 
 /**
+ * Subjects that ask for "some music" rather than for a particular song.
+ * @type {Set<string>}
+ */
+const GENERIC_SUBJECTS = new Set([
+  '音乐', '歌', '歌曲', '歌儿', '曲子', '点歌', '听歌', '歌单',
+  '好听的', '好听的歌', '好听', '音乐歌单', '随便', '随机', '任意',
+])
+
+/** Bare "some music" shapes that survive prefix stripping. */
+const GENERIC_SHAPE = /^(随便|随机|任意|推荐|来点|放点|整点)*(点)?(歌|音乐|歌曲|歌单|好听的|好听的歌)?$/u
+
+/**
+ * Shapes made of nothing but a request verb plus a generic noun: 「放首歌」
+ * 「再来一首」「播放」「来点」. `parseArtistRequest` leaves these intact because
+ * stripping guards against eating a one-character subject.
+ */
+const VERB_ONLY_SHAPE =
+  /^(播放|放|来|听|整|点|搜|找|唱|换|再|想听|我想听|帮我|给我|请)+[一首两个段点位]*(歌|音乐|歌曲|歌单|歌儿|好听的|好听的歌)?[吧了呀啊哦]?$/u
+
+/**
+ * Is this a request for *any* music rather than for a specific track?
+ *
+ * 「播放音乐」「放点歌」「来点好听的」「随便放点」 name no song and no performer,
+ * so searching songs for them can only return tracks whose titles happen to
+ * contain the word 音乐. Those requests should get the account's daily mix
+ * instead. A request that still names something (「播放日语歌」「来点周杰伦」)
+ * is *not* generic — the noun is the requirement.
+ * @param {string} query
+ * @returns {boolean}
+ */
+export function isGenericPlayRequest(query) {
+  const raw = String(query ?? '').trim()
+  if (!raw) return false
+  const { core } = parseArtistRequest(raw)
+  // 「放首歌」剥掉动词后剩「首歌」：量词不是需求
+  const text = core
+    .replace(/[\s，,。.、!！?？~～]+/gu, '')
+    .replace(/^[首个段点位]+/u, '')
+  if (!text) return true // 「播放」「来点」：只有动词
+  if (GENERIC_SUBJECTS.has(text)) return true
+  return GENERIC_SHAPE.test(text) || VERB_ONLY_SHAPE.test(text)
+}
+
+/**
  * @param {{ncm: any, netease: any, logger?: any}} deps
  */
 export function createResolver({ ncm, netease, logger }) {

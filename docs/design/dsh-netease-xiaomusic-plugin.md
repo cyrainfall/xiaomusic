@@ -259,12 +259,34 @@ export function apply(ctx, config) { /* 注册工具、路由、会话池 */ }
 | --- | --- | --- | --- |
 | `ncm_search` | 搜歌/歌手/歌单，返回可播候选 | `keyword`(必填)、`type`=song\|artist\|playlist、`limit`≤10 | `{items:[{name, artists[], album, durationSec, encryptedId, originalId, visible, playFlag, vipFlag, fee, coverUrl}]}`（实测字段见 16.3） |
 | `ncm_play` | 解析直链并播放（可按要求只解析） | `encryptedId`/`originalId` 或 `keyword`、`speaker`、`quality` | `{played:bool, song:{...}, speaker:{did,name}, url}` |
+| `ncm_recommend` | 「播放音乐」这类没点名具体歌的请求：拉每日推荐整队列播放 | `count`(默认 30)、`speaker`、`level` | `{label:"每日推荐", items:[30], song, playUrl}` |
 | `ncm_control` | 播放控制 | `action`=pause\|resume\|stop\|next\|prev\|seek\|volume、`value`、`speaker` | `{ok, state}` |
 | `ncm_status` | 当前播放/设备状态 | `speaker` | `{device:{...}, status, song, positionSec, volume}` |
 | `speaker_list` | 列出音箱与分组 | — | `{speakers:[{did, name, group, online}]}` |
 | `speaker_say` | TTS 播报 | `text`(必填)、`speaker` | `{ok}` |
 
-示例（`ncm_play`）：
+#### 5.3.1 泛播放 → 每日推荐 30 首（v0.23）
+
+「播放音乐」「放点歌」「随便放点」「来点好听的」这类说法**没有点名歌名或歌手**。
+按关键词搜歌只能搜到名字里正好含「音乐」的歌，等于瞎放（实测原型里会随机落到某个歌手）。
+
+约定：**没点名具体需求 = 要今日推荐**。
+
+```
+「播放音乐」→ isGenericPlayRequest() 为真
+        → netease.dailyRecommend()       # /api/v3/discovery/recommend/songs
+        → 30 首整队列 queue.record(60 上限)
+        → 从第 1 首开始播，「下一首」在这 30 首里接着走
+```
+
+- 判定在 `resolve.isGenericPlayRequest()`：剥掉动词/量词后只剩「音乐/歌/好听的/随便」
+  这类词才算泛请求；「播放日语歌」「来点周杰伦」仍有需求，不算泛请求。
+- `ncm_play` 收到泛词会自动转 `ncm_recommend`，不依赖模型记得换工具（提示词也写了）。
+- 每日推荐按账号口味由网易云算好，不需要插件自己造推荐器；实测本机账号 30/30 可解析 320k 直链。
+- 第一首若解析失败，往后挪最多 3 首再放弃，不因一首没版权让整条 30 首请求失败。
+- 拿不到每日推荐（没 cookie / 未登录）时退回公开热歌榜，并在回话里说明；完全没 cookie 则
+  明确指出需要 MUSIC_U（直链本身就必须 cookie）。
+
 
 ```js
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -1349,3 +1371,4 @@ strict-peer-dependencies=false     # 让缺失 peer 降级为 warning
 | v0.21 | 零安装：新增 `lib/runtime.js` 托管 xiaomusic（uv/python 建环境 → pip 装包 → 覆盖 vendor 补丁 → 生成配置 → 守护进程），不再需要 `start-xiaomusic.bat`；新增 `xm_setup` 工具做首次配置与自检；`baseUrl` 指向外部时自动降级为纯客户端。实测全新目录 6.2 秒完成安装+补丁+启动，接管已有安装时保留原 `music_path`/口令表（17.0.9） |
 
 | v0.22 | 修「非音乐对话也被 xiaomusic 接管」：「六点二十叫我起床」原本走未命中兜底进大模型，xiaomusic 先掐掉小爱的应答、再让模型用 TTS 道歉，闹钟没设成。现在 `is_passthrough_to_xiaoai()` 把闹钟/天气/时间/家电/闲聊直接放行给小爱（不掐、不念 TTS、不转发），兜底改为只在 `agent_bridge_when=fallback` 时生效；新增 `agent_bridge_non_music_patterns` / `agent_bridge_query_patterns` / `agent_bridge_music_patterns`；`parse_stop_delay` 不再把「半个小时后关闭叫我起床」当延时关机；插件侧提示词先判音乐意图，并用 `isNonMusic()` 兜底丢弃非音乐的 chat 回复（17.0.10）|
+| v0.23 | 泛播放改为每日推荐：「播放音乐」「放点歌」「随便放点」这类没点名歌名/歌手的请求，不再当歌名去搜（原行为会随机落到某个歌手），改为拉账号「每日推荐」30 首整队列推给音箱，「下一首」在 30 首内接力；新增 `ncm_recommend` 工具与 `resolve.isGenericPlayRequest()`，`ncm_play` 遇泛词自动转推荐；队列上限 20→60（原先 30 首会被截断）；无 cookie/取不到推荐时退回公开热歌榜（17.0.11）|

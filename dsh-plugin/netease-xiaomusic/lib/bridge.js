@@ -28,7 +28,15 @@ function trace(line) {
 }
 
 /** Tools a voice turn may use. Anything else is refused outright. */
-export const MUSIC_TOOLS = ['speaker_list', 'ncm_search', 'ncm_play', 'ncm_control', 'ncm_status', 'speaker_say']
+export const MUSIC_TOOLS = [
+  'speaker_list',
+  'ncm_search',
+  'ncm_play',
+  'ncm_recommend',
+  'ncm_control',
+  'ncm_status',
+  'speaker_say',
+]
 
 /**
  * Utterances this plugin must never answer, whatever the model decides.
@@ -169,12 +177,15 @@ export function createVoiceBridge({ cfg, ctx, logger, queue }) {
       '也不要说话，直接结束**。系统会把这句话交还给音箱自己的语音助手，',
       '这才是用户想要的（你开口反而会打断小爱的正确回答）。',
       '第二步：如果是 A/B/C，按下面来：',
-      '  1. 想听歌（说了歌名、歌手、或"来点/放点/听点+某样东西"）→ 立刻调用一次 ncm_play，keyword 原样传用户说的内容。',
-      '     例：「播放许嵩的歌」→ ncm_play(keyword="许嵩的歌")；「来点周杰伦」→ ncm_play(keyword="周杰伦")；',
-      '     「放首素颜」→ ncm_play(keyword="素颜")。工具自己会搜索、会按歌手取歌、会选版本，不需要你先搜索。',
-      '  2. 停 / 下一首 / 上一首 / 音量 → ncm_control。',
-      '  3. 只有在问"在放什么"时才用 ncm_status。',
-      '  4. 只有确认是音乐请求、但整句话里完全听不出任何歌名或歌手时，才用 speaker_say 请用户再说一遍。',
+      '  1. 想听歌，但**没点名具体歌名或歌手**（「播放音乐」「放点歌」「随便放点」「来点好听的」）',
+      '     → 调用 ncm_recommend。它会把账号的每日推荐 30 首整队列推给音箱，别再自己搜关键词。',
+      '  2. 想听歌且**说得出歌名或歌手**（「播放稻香」「来点周杰伦」「放首素颜」）→ 调用一次 ncm_play，',
+      '     keyword 原样传用户说的内容。工具自己会搜索、会按歌手取歌、会选版本，不需要你先搜索。',
+      '     例：「播放许嵩的歌」→ ncm_play(keyword="许嵩的歌")；「放首素颜」→ ncm_play(keyword="素颜")。',
+      '  3. 停 / 下一首 / 上一首 / 音量 → ncm_control。',
+      '  4. 只有在问"在放什么"时才用 ncm_status。',
+      '  5. 只有确认是音乐请求、但整句话里完全听不出任何歌名或歌手、也不属于「播放音乐」这类泛请求时，',
+      '     才用 speaker_say 请用户再说一遍。',
       '说了歌手就算说清楚了：**不要反问"想听哪一首"，不要说"没听清"**。',
       '最多两次工具调用；不要输出 Markdown，不要解释工具。',
     ].join('\n')
@@ -224,7 +235,8 @@ export function createVoiceBridge({ cfg, ctx, logger, queue }) {
             order: agentCtx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
             text:
               '你是小爱音箱的音乐助手。用户的话来自音箱语音识别，可能有错别字或语气词。' +
-              '**你只处理音乐**：播放用 ncm_play（它自己会搜索、按歌手取歌、选版本），' +
+              '**你只处理音乐**：点歌用 ncm_play（它自己会搜索、按歌手取歌、选版本），' +
+              '只说了「播放音乐」「随便放点」这类没点名具体歌的，用 ncm_recommend（每日推荐整队列），' +
               '搜歌用 ncm_search，控制用 ncm_control，查询用 ncm_status，需要说话用 speaker_say。' +
               '设闹钟、提醒、起床、天气、时间、灯和家电、导航、闲聊这些都不归你管：' +
               '遇到就一个工具都不调用、也不说话，直接结束，让音箱自己的助手去回答。' +

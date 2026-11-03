@@ -185,5 +185,82 @@ export function createNetease(cfg, logger) {
     }
   }
 
-  return { resolveStream, searchWeb, searchArtist, artistTopSongs }
+  /** Account identity, cached: the daily mix is per account. */
+  let accountCache = null
+
+  /**
+   * Who the cookie belongs to. Only used for diagnostics and the "whose taste"
+   * wording — the daily mix itself needs nothing but the cookie.
+   * @returns {Promise<{uid: string, nickname: string}>}
+   */
+  async function account() {
+    const now = Date.now()
+    if (accountCache && now - accountCache.at < 10 * 60_000) return accountCache.value
+    let value = { uid: '', nickname: '' }
+    try {
+      const body = await webJson('https://music.163.com/api/nuser/account/get', true)
+      const profile = body?.profile || {}
+      value = {
+        uid: String(body?.account?.id || profile.userId || ''),
+        nickname: String(profile.nickname || ''),
+      }
+      accountCache = { at: now, value }
+    } catch (err) {
+      logger?.debug?.(`netease-xiaomusic: account lookup failed: ${String(err?.message ?? err).slice(0, 120)}`)
+    }
+    return value
+  }
+
+  /**
+   * The account's daily mix (每日推荐).
+   *
+   * This is the personalised list the web player shows under 「每日推荐」: the
+   * server picks it from this account's listening history, so a bare
+   * 「播放音乐」 has something taste-shaped to play without the plugin having to
+   * invent a recommender. Needs the account cookie; without it the endpoint
+   * answers -460/301 and the caller falls back to a public chart.
+   * @returns {Promise<{ok: true, items: object[]} | {ok: false, error: string, detail?: string}>}
+   */
+  async function dailyRecommend() {
+    try {
+      const body = await webJson('https://music.163.com/api/v3/discovery/recommend/songs', true)
+      const code = Number(body?.code)
+      if (code !== 200) {
+        if (code === 301 || code === -460 || code === -462) return { ok: false, error: 'NCM_NOT_LOGGED_IN', detail: `code=${code}` }
+        return { ok: false, error: 'NCM_API_ERROR', detail: `code=${body?.code}` }
+      }
+      const songs = body?.data?.dailySongs || []
+      if (!Array.isArray(songs) || songs.length === 0) return { ok: false, error: 'NCM_NO_SOURCE', detail: '每日推荐为空' }
+      logger?.debug?.(`netease-xiaomusic: 每日推荐 ${songs.length} 首`)
+      return { ok: true, items: songs.map(mapWebSong) }
+    } catch (err) {
+      return { ok: false, error: 'NCM_NETWORK_ERROR', detail: String(err?.message ?? err).slice(0, 120) }
+    }
+  }
+
+  /**
+   * A public playlist/chart, used only as a fallback when the daily mix is not
+   * available (no cookie / not logged in). Default is 热歌榜.
+   * @param {string} [id] @param {{limit?: number}} [opts]
+   * @returns {Promise<{ok: true, items: object[], name: string} | {ok: false, error: string, detail?: string}>}
+   */
+  async function chartSongs(id = '3778678', opts = {}) {
+    const pid = String(id || '').trim()
+    if (!/^\d+$/.test(pid)) return { ok: false, error: 'NCM_BAD_ID' }
+    try {
+      const body = await webJson(`https://music.163.com/api/playlist/detail?id=${pid}`, true)
+      const tracks = body?.result?.tracks || []
+      if (!Array.isArray(tracks) || tracks.length === 0) return { ok: false, error: 'NCM_NO_SOURCE' }
+      const limit = Math.max(1, Math.min(50, opts.limit || 30))
+      return {
+        ok: true,
+        items: tracks.slice(0, limit).map(mapWebSong),
+        name: String(body?.result?.name || '热歌榜'),
+      }
+    } catch (err) {
+      return { ok: false, error: 'NCM_NETWORK_ERROR', detail: String(err?.message ?? err).slice(0, 120) }
+    }
+  }
+
+  return { resolveStream, searchWeb, searchArtist, artistTopSongs, account, dailyRecommend, chartSongs }
 }

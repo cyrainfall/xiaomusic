@@ -9,7 +9,7 @@
 
 import { existsSync, writeFileSync } from 'node:fs'
 
-import { pickSong } from './resolve.js'
+import { isGenericPlayRequest, pickSong } from './resolve.js'
 
 /** @param {any} err @returns {string} */
 const messageOf = (err) => String(err?.message ?? err).slice(0, 200)
@@ -132,6 +132,148 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
   const speakerParam = {
     type: 'string',
     description: '目标音箱：did、设备名或别名。省略时用配置的默认音箱；只有一个设备时自动选中。',
+  }
+
+  /**
+   * Resolve, remember, and start one track.
+   *
+   * Shared by 「点一首」 and 「随便放点」: both resolve a stream, remember the
+   * candidate list so next/prev walk NetEase instead of a stale local playlist,
+   * then either hand the URL back (voice turn — xiaomusic plays it after stopping
+   * the speaker's own answer) or push it directly (chat turn).
+   * @returns {Promise<{ok: true, deferred: boolean, song: object, durationSec: number, stream?: any, started?: boolean} | {ok: false, error: string, detail?: string, song?: object}>}
+   */
+  async function startPlayback({ device, song, candidates, keyword, level, exec }) {
+    const stream = await netease.resolveStream({ originalId: song.originalId, level })
+    if (!stream.ok) return { ok: false, error: stream.error, detail: stream.detail, song }
+
+    // xiaomusic needs the length to schedule the following track; the metadata is
+    // sometimes empty, so fall back to the stream's own size.
+    const durationSec = song.durationSec || (stream.br > 0 ? Math.round((stream.size * 8) / stream.br) : 0)
+    queue?.record(device.did, {
+      items: candidates && candidates.length > 0 ? candidates : [song],
+      song,
+      keyword: String(keyword || ''),
+      durationSec,
+    })
+
+    const slot = voiceSlotFor(exec)
+    if (slot) {
+      voice.complete(slot, {
+        action: 'play',
+        playUrl: stream.url,
+        durationSec,
+        song: {
+          name: song.name,
+          artists: song.artists || [],
+          album: song.album || '',
+          originalId: song.originalId,
+        },
+      })
+      return { ok: true, deferred: true, song, durationSec, stream }
+    }
+
+    const pushed = await xm.playUrl(device.did, stream.url, { durationSec })
+    if (!pushed.ok) return { ok: false, error: pushed.error, detail: pushed.detail, song }
+    lastPushed.set(device.did, {
+      name: song.name,
+      artists: song.artists || [],
+      album: song.album || '',
+      originalId: song.originalId,
+      at: Date.now(),
+    })
+    // A pushed URL does not update xiaomusic's own play state, so confirm with the
+    // device: report what actually happened instead of "指令已下发".
+    const started = await waitForPlayback(device.did, 6000)
+    return { ok: true, deferred: false, song, durationSec, stream, started }
+  }
+
+  /**
+   * 「播放音乐」/「随便放点」: play the account's 每日推荐.
+   *
+   * A generic request names no song, so searching one only finds tracks titled
+   * 《音乐》. The daily mix is already personalised by the account's own listening
+   * history, which is exactly what 「按我的口味来点」 means. Without a cookie the
+   * endpoint refuses, and a public chart keeps the request from going silent.
+   * @param {{device: object, count?: number, level?: string, exec?: any}} input
+   */
+  async function playDaily({ device, count, level, exec }) {
+    let label = '每日推荐'
+    let note = ''
+    let songs = []
+
+    const daily = await netease.dailyRecommend()
+    if (daily.ok) {
+      songs = daily.items
+    } else {
+      logger?.info?.(`netease-xiaomusic: 每日推荐不可用（${daily.error}），退回公开榜单`)
+      const chart = await netease.chartSongs()
+      if (!chart.ok) return { ok: false, error: daily.error, detail: daily.detail }
+      songs = chart.items
+      label = chart.name
+      note = '（今天拿不到每日推荐，先用这张榜）'
+    }
+
+    // Same id twice, or a track without an id, would make "下一首" a no-op.
+    const seen = new Set()
+    const items = []
+    for (const song of songs) {
+      const id = String(song.originalId || '')
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      items.push(song)
+    }
+    const limit = Math.max(1, Math.min(30, Number(count) || 30))
+    const list = items.slice(0, limit)
+    if (list.length === 0) return { ok: false, error: 'NCM_NO_SOURCE', detail: '每日推荐为空' }
+
+    // The first pick can be one this account cannot stream; move on rather than
+    // failing a 30-song request over one track.
+    let played = null
+    for (let i = 0; i < Math.min(3, list.length); i += 1) {
+      played = await startPlayback({
+        device,
+        song: list[i],
+        candidates: list,
+        keyword: label,
+        level,
+        exec,
+      })
+      if (played.ok) break
+      logger?.info?.(`netease-xiaomusic: ${label} 第 ${i + 1} 首不可播（${played.error}），换下一首`)
+    }
+    if (!played || !played.ok) return played || { ok: false, error: 'NCM_NO_SOURCE' }
+
+    return { ...played, items: list, label, note }
+  }
+
+  /** What to say after one track started (or was handed off on the voice path). */
+  function playText(r, device) {
+    const song = r.song
+    const artist = (song.artists || []).length ? ' — ' + song.artists.join('/') : ''
+    if (r.deferred) return `已找到《${song.name}》${artist}，交给音箱播放。`
+    const quality = r.stream
+      ? `${Math.round(r.stream.br / 1000)}k ${r.stream.type === 'flac' ? 'FLAC' : 'MP3'}`
+      : ''
+    const head = r.started
+      ? `已在「${device.name}」播放：`
+      : `已把「${song.name}」推给「${device.name}」，但 6 秒内没读到设备进入播放状态（可能仍在缓冲，或被别的指令抢占）。已下发内容：`
+    return (
+      `${head}${song.name}${artist}${song.album ? `《${song.album}》` : ''}` +
+      `${quality ? `（${quality}）` : ''}\n网易云链接：https://music.163.com/#/song?id=${song.originalId}`
+    )
+  }
+
+  /** What to say after a daily mix started. */
+  function dailyText(r, device) {
+    const lines = r.items
+      .slice(0, 8)
+      .map((s, i) => `${i + 1}. ${s.name}${(s.artists || []).length ? ' — ' + s.artists.join('/') : ''}`)
+    const more = r.items.length > lines.length ? `\n…共 ${r.items.length} 首` : ''
+    const head = r.deferred
+      ? `按你的${r.label}挑了 ${r.items.length} 首，先从《${r.song.name}》开始，交给音箱播放。`
+      : `按你的${r.label}挑了 ${r.items.length} 首，正在「${device.name}」播放《${r.song.name}》。`
+    return `${head}${r.note || ''}\n${lines.join('\n')}${more}\n之后说「下一首」就在这 ${r.items.length} 首里接着走。`
   }
 
   const outputSchema = {
@@ -326,6 +468,14 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
         } else {
           const keyword = String(args?.keyword ?? '').trim()
           if (!keyword) return result('需要 keyword，或者 encryptedId + originalId。', true)
+          // 「播放音乐」不是歌名：按它搜只会搜到名叫《音乐》的歌。这类没有具体
+          // 点名的请求走每日推荐，而不是把关键词硬塞进歌名搜索。
+          if (isGenericPlayRequest(keyword)) {
+            logger?.info?.(`netease-xiaomusic: 「${keyword}」视为泛播放请求，转每日推荐`)
+            const daily = await playDaily({ device, level: args?.level, exec })
+            if (!daily.ok) return result(explain(daily.error, daily.detail), true)
+            return result(dailyText(daily, device))
+          }
           const search = await resolver.candidates(keyword, { limit: 20 })
           if (!search.ok) return result(explain(search.error, search.detail), true)
           lastSearch = { items: search.items, keyword, at: Date.now() }
@@ -342,67 +492,57 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
           // So they only order the candidates; the stream call decides.
         }
 
-        const stream = await netease.resolveStream({ originalId: song.originalId, level: args?.level })
-        if (!stream.ok) {
-          return result(`《${song.name}》直链解析失败：${explain(stream.error, stream.detail)}`, true)
-        }
-
-        // Keep the candidates around so "下一首/上一首" can walk the NetEase list
-        // instead of xiaomusic's stale local playlist.
-        const durationSec =
-          song.durationSec || (stream.br > 0 ? Math.round((stream.size * 8) / stream.br) : 0)
-        queue?.record(device.did, {
-          items: candidates.length > 0 ? candidates : [song],
+        const played = await startPlayback({
+          device,
           song,
-          keyword: String(args?.keyword || ''),
-          durationSec,
+          candidates,
+          keyword: args?.keyword,
+          level: args?.level,
+          exec,
         })
-
-        // Speaker-initiated turn: resolve only. xiaomusic plays it after stopping
-        // the speaker's own answer, so the plugin never pushes on this path.
-        const slot = voiceSlotFor(exec)
-        if (slot) {
-          voice.complete(slot, {
-            action: 'play',
-            playUrl: stream.url,
-            durationSec,
-            song: {
-              name: song.name,
-              artists: song.artists || [],
-              album: song.album || '',
-              originalId: song.originalId,
-            },
-          })
-          logger?.info?.(`netease-xiaomusic: voice turn resolved ${song.name} (${song.originalId})`)
-          return result(
-            `已找到《${song.name}》${(song.artists || []).length ? ' — ' + song.artists.join('/') : ''}，交给音箱播放。`,
-          )
+        if (!played.ok) {
+          return result(`《${song.name}》直链解析失败：${explain(played.error, played.detail)}`, true)
         }
+        logger?.info?.(`netease-xiaomusic: playing ${played.song.name} (${played.song.originalId}) on ${device.name}`)
+        return result(playText(played, device))
+      },
+    },
 
-        const pushed = await xm.playUrl(device.did, stream.url, { durationSec })
-        if (!pushed.ok) return result(explain(pushed.error, pushed.detail), true)
-        lastPushed.set(device.did, {
-          name: song.name,
-          artists: song.artists || [],
-          album: song.album || '',
-          originalId: song.originalId,
-          at: Date.now(),
+    {
+      name: 'ncm_recommend',
+      timeoutMs: 60000,
+      description:
+        '按账号口味播放：拉取网易云「每日推荐」整张列表（默认 30 首）一次性推给音箱，' +
+        '从第一首开始播，之后「下一首」就在这 30 首里接着走。' +
+        '用户说「播放音乐」「放点歌」「随便放点」「来点好听的」「推荐几首歌」这类' +
+        '没有点名具体歌名或歌手的请求时用它；说得出歌名或歌手就别用它，改用 ncm_play。',
+      parameters: {
+        type: 'object',
+        properties: {
+          count: { type: 'integer', description: '播放多少首，默认 30（每日推荐一天只有 30 首）' },
+          speaker: speakerParam,
+          level: { type: 'string', enum: ['standard', 'higher', 'exhigh', 'lossless', 'hires'], description: '音质，默认 exhigh（320k mp3）' },
+        },
+        additionalProperties: false,
+      },
+      output: { schema: outputSchema, render },
+      async execute(args, exec) {
+        const boot = await awaitRuntime()
+        if (!boot.ok) return result(explain(boot.error, boot.detail), true)
+        const target = await xm.resolveSpeaker(String(args?.speaker ?? ''), cfg.defaultSpeaker)
+        if (!target.ok) return result(explain(target.error, target.detail), true)
+
+        const daily = await playDaily({
+          device: target.device,
+          count: args?.count,
+          level: args?.level,
+          exec,
         })
-
-        // A pushed URL does not update xiaomusic's own play state, so confirm with
-        // the device: report what actually happened instead of "指令已下发".
-        const started = await waitForPlayback(device.did, 6000)
-
-        logger?.info?.(`netease-xiaomusic: playing ${song.name} (${song.originalId}) on ${device.name}`)
-        const quality = `${Math.round(stream.br / 1000)}k ${stream.type === 'flac' ? 'FLAC' : 'MP3'}`
-        const head = started
-          ? `已在「${device.name}」播放：`
-          : `已把「${song.name}」推给「${device.name}」，但 6 秒内没读到设备进入播放状态（可能仍在缓冲，或被别的指令抢占）。已下发内容：`
-        return result(
-          `${head}${song.name}${song.artists?.length ? ' — ' + song.artists.join('/') : ''}` +
-            `${song.album ? `《${song.album}》` : ''}（${quality}）\n` +
-            `网易云链接：https://music.163.com/#/song?id=${song.originalId}`,
+        if (!daily.ok) return result(explain(daily.error, daily.detail), true)
+        logger?.info?.(
+          `netease-xiaomusic: ${daily.label} ${daily.items.length} 首，从《${daily.song.name}》开始 on ${target.device.name}`,
         )
+        return result(dailyText(daily, target.device))
       },
     },
 
