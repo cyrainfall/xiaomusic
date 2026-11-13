@@ -494,6 +494,33 @@ export function createRuntime({ cfg, logger, xm }) {
   }
 
   /**
+   * Does the service that is already answering carry our patch?
+   *
+   * Adopting is the right default — never fight a service the user started — but
+   * a stock xiaomusic has no non-music gate and no bridge defaults, so adopting
+   * one silently reintroduces 「开风扇」 → 「好的，正在找歌」. The patched config
+   * exposes extra keys (`agent_bridge_non_music_patterns`), which is the cheapest
+   * honest marker: a stock 0.6.1 `/getsetting` has no such field.
+   * @returns {Promise<boolean>} true when the marker is absent (unknown) too
+   */
+  async function adoptedIsPatched() {
+    try {
+      const res = await fetch(`http://127.0.0.1:${cfg.xiaomusic.port}/getsetting`, {
+        signal: AbortSignal.timeout(2500),
+      })
+      if (!res.ok) return true
+      // Substring, not JSON.parse: the payload embeds `music_list_json`, whose
+      // escapes are not always valid JSON, and parsing 40 KB just to look for one
+      // key would fail on that instead of on the thing we care about.
+      const text = await res.text()
+      return text.includes('agent_bridge_non_music_patterns')
+    } catch {
+      // Could not tell: do not cry wolf on a healthy service.
+      return true
+    }
+  }
+
+  /**
    * Bring the stack up. Safe to call once per plugin load.
    * @returns {Promise<{ok: boolean, adopted?: boolean, started?: boolean, error?: string, detail?: string}>}
    */
@@ -508,8 +535,17 @@ export function createRuntime({ cfg, logger, xm }) {
     // Something already answers on the port: it is either a previous run of ours
     // or the user's own service. Never fight it.
     if (await healthy()) {
-      logger?.info?.(`netease-xiaomusic: 复用已在运行的 xiaomusic（:${cfg.xiaomusic.port}）`)
-      state = { stopped: true, restarts: 0, adopted: true }
+      const patched = await adoptedIsPatched()
+      if (patched) {
+        logger?.info?.(`netease-xiaomusic: 复用已在运行的 xiaomusic（:${cfg.xiaomusic.port}）`)
+      } else {
+        logger?.warn?.(
+          `netease-xiaomusic: :${cfg.xiaomusic.port} 上跑的是**没打补丁**的 xiaomusic（原版 0.6.1）——` +
+            '非音乐口令（闹钟/风扇/天气…）会被转发给大模型并先念一句「好的，正在找歌」。' +
+            '把 vendor/xiaomusic 的 6 个文件覆盖进它的站点包后重启，或停掉它让插件托管自己的副本。',
+        )
+      }
+      state = { stopped: true, restarts: 0, adopted: true, patched }
       readyResolve({ ok: true, adopted: true })
       return { ok: true, adopted: true }
     }
@@ -637,6 +673,8 @@ export function createRuntime({ cfg, logger, xm }) {
       pid: state?.child?.pid,
       lastExit: state?.lastExit,
       baseUrl: cfg.xiaomusic.baseUrl,
+      // false means we adopted a service without our patch (see adoptedIsPatched).
+      patched: state?.patched,
     }),
   }
 }
