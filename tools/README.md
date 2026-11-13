@@ -10,6 +10,22 @@
 | `backup-login.ps1` | 把 `conf/auth.json`、`conf/.mi.token` 备份到 `conf/.login-backup/` |
 | `apply-listen-schedule.py` | 启动时按当前小时设置 `enable_pull_ask`（02:00–10:00 不监听） |
 | `register-tasks.ps1` | 注册/更新两个计划任务（服务自启、每 10 分钟登录备份） |
+| `patch-venv.sh` | 把 `xiaomusic/*.py` 六个补丁文件覆盖进某个 venv 的站点包；`--check` 只体检 |
+
+## 补丁别丢：`patch-venv.sh`
+
+`pip install -U xiaomusic` 会把站点包退回原版，症状是「开风扇」被当点歌、
+先念一句「好的，正在找歌」（原版 `should_delegate()` 未命中就转发）。补丁
+不只在 `tools/patches/`（那两处文本替换里），还包括 `xiaomusic/*.py` 本身。
+
+```bash
+tools/patch-venv.sh --check                 # 体检仓库 .venv（有差异退出码 1）
+tools/patch-venv.sh --check ~/.dsh/xiaomusic/.venv
+tools/patch-venv.sh                         # 重打仓库 .venv（改完必须重启服务）
+```
+
+插件侧也加了同一道哨：复用已运行的 xiaomusic 前会探 `/getsetting`，没有
+`agent_bridge_non_music_patterns` 就告警，不再静默采纳原版。
 
 ## 首次部署
 
