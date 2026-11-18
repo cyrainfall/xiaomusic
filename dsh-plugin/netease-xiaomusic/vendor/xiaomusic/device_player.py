@@ -76,6 +76,14 @@ class XiaoMusicDevice:
         # 说完整理后要按这个地址接着放，否则音箱就停在那儿了。
         self._pushed_url = ""
         self._tts_resume_next = False
+        # 「下一首」定时器到点时，用来判断上一首是「自然播完」还是「用户关掉了」：
+        # 前者该续播，后者绝不能续播（否则「关闭音乐」几分钟后又自己响起来）。
+        # 由 _watch_playback 周期刷新，记最后一次确认设备在播的时刻。
+        self._last_playing_at = 0.0
+        self._playback_watch = None
+        # 只有「外部推流」才启用上面那套判定：本地歌单没有 _pushed_url，
+        # 不能用同一把尺子（否则播完一首就被当成「用户关了」）。
+        self._watch_armed = False
         # 正在执行的 stop 任务：TTS 定时器触发的 stop 会等 mina 接口好几秒，
         # 期间别推新歌，否则推上去立刻又被这次 stop 掐掉
         self._stop_task = None
@@ -1175,6 +1183,18 @@ class XiaoMusicDevice:
                     if self.device.play_type == PLAY_TYPE_SIN:
                         self.log.info(f"单曲播放不继续播放下一首 did: {self.did}")
                         await self.stop(arg1="notts")
+                    elif await self._stopped_by_user():
+                        # 用户在音箱侧关掉/暂停了（语音口令小爱自己吃了、用 App 停的、
+                        # 或夜间不监听时段），xiaomusic 全程没收到 stop。定时器到点
+                        # 不能把它续上，否则就是「关了音乐过几分钟又自动播放」。
+                        self.log.info(
+                            f"定时器到点，但音乐早已被用户停止（"
+                            f"{int(time.time() - self._last_playing_at)}s 前最后一次在播），不再续播"
+                        )
+                        self._pushed_url = ""
+                        bridge = getattr(self.xiaomusic, "agent_bridge", None)
+                        if bridge is not None:
+                            await bridge.forget(self.did)
                     else:
                         await self._play_next()
                 else:
@@ -1185,7 +1205,59 @@ class XiaoMusicDevice:
                 self.log.error(f"Execption {e}")
 
         self._next_timer = asyncio.create_task(_do_next())
+        self._watch_playback(sec)
         self.log.info(f"{sec} 秒后将会播放下一首歌曲 did: {self.did}")
+
+    def _watch_playback(self, sec):
+        """起一个旁路任务，记录「最后一次确认在播」的时间。
+
+        `sec` 是这一首还剩多少秒。采样间隔取 10s：自然播完时最后一次「在播」
+        距定时器到点只有十几秒；而用户中途关掉的话，那个时刻会停留在关闭点，
+        距到点还有大半首歌——两者的差值就是判断依据，不需要区分 status 语义。
+        """
+        if sec < 30 or self.isdownloading():
+            return
+        if not self._pushed_url:
+            # 本地歌单播放：没有「外部推流被用户关掉」这种情况，不启用判定
+            self._watch_armed = False
+            return
+        if self._playback_watch is not None:
+            self._playback_watch.cancel()
+            self._playback_watch = None
+
+        async def _loop():
+            self._watch_armed = True
+            self._last_playing_at = time.time()
+            deadline = time.time() + sec + 30
+            try:
+                while time.time() < deadline:
+                    await asyncio.sleep(10)
+                    if not self._pushed_url:
+                        return  # 已经被 stop() 明确清掉，没什么可看的
+                    try:
+                        if await self.get_if_xiaoai_is_playing():
+                            self._last_playing_at = time.time()
+                    except Exception:
+                        # 一次查询失败不代表停了，跳过这次采样
+                        self.log.debug(f"查询播放状态失败 did: {self.did}")
+            except asyncio.CancelledError:
+                pass
+
+        self._playback_watch = asyncio.create_task(_loop())
+
+    async def _stopped_by_user(self):
+        """上一首是不是「早就被用户停掉了」，而不是刚刚自然播完。
+
+        判据：最后一次确认在播的时刻，距此刻超过 60 秒。自然播完时这个差值
+        只有采样间隔的量级（10~20s）；用户中途关闭则是一首剩下的大半时长。
+        只对外部推流生效（见 _watch_armed）。
+        """
+        if not self._watch_armed:
+            return False
+        last = self._last_playing_at or 0
+        if last <= 0:
+            return False
+        return (time.time() - last) > 60
 
     async def set_volume(self, volume: int):
         """设置音量"""
