@@ -75,6 +75,9 @@ class XiaoMusicDevice:
         # 外部推流（插件/手动 /playurl）最后推送的 URL：TTS 会打断它，
         # 说完整理后要按这个地址接着放，否则音箱就停在那儿了。
         self._pushed_url = ""
+        # 这条推流有多长（秒）。TTS 打断之后要把它重新推一遍，而没有时长就
+        # 排不出「播完接下一首」，这一首放完就彻底静音了。
+        self._pushed_duration = 0
         self._tts_resume_next = False
         # 「下一首」定时器到点时，用来判断上一首是「自然播完」还是「用户关掉了」：
         # 前者该续播，后者绝不能续播（否则「关闭音乐」几分钟后又自己响起来）。
@@ -446,7 +449,7 @@ class XiaoMusicDevice:
         if self._pushed_url:
             # 推流已经放完，插件那边也没下一首了：宁可停，也不要跳回本地歌单
             self.log.info("推流已结束且插件队列没有下一首，不回落本地列表")
-            self._pushed_url = ""
+            self._clear_pushed()
             return
         self.log.info("开始播放下一首")
         name = self.get_cur_music()
@@ -569,7 +572,7 @@ class XiaoMusicDevice:
                 pass
 
         # 换成 xiaomusic 自己的播放列表了，之前的推流地址不再需要恢复
-        self._pushed_url = ""
+        self._clear_pushed()
         self.is_playing = True
         self.device.cur_music = name
         self.device.playlist2music[self.device.cur_playlist] = name
@@ -1191,7 +1194,7 @@ class XiaoMusicDevice:
                             f"定时器到点，但音乐早已被用户停止（"
                             f"{int(time.time() - self._last_playing_at)}s 前最后一次在播），不再续播"
                         )
-                        self._pushed_url = ""
+                        self._clear_pushed()
                         bridge = getattr(self.xiaomusic, "agent_bridge", None)
                         if bridge is not None:
                             await bridge.forget(self.did)
@@ -1332,7 +1335,7 @@ class XiaoMusicDevice:
             self.is_playing = False
             if arg1 != "notts":
                 # 用户明确要停：之后再说 TTS 也不该把这首歌捡回来
-                self._pushed_url = ""
+                self._clear_pushed()
                 await self.do_tts(self.config.stop_tts_msg)
                 await asyncio.sleep(3)  # 等它说完
             # 取消组内所有的下一首歌曲的定时器
@@ -1360,11 +1363,21 @@ class XiaoMusicDevice:
         except Exception:
             self.log.exception("等待停止收尾失败")
 
+    def _clear_pushed(self):
+        """忘掉这条外部推流：用户停了、放完了，或者换成自己的歌单了。"""
+        self._pushed_url = ""
+        self._pushed_duration = 0
+
     async def resume_pushed_url(self):
         """TTS 说完了，接着放被它打断的推流。
 
         外部推流（插件 / 手动 /playurl）不属于 xiaomusic 的播放列表，
         stop 之后 check_replay 无从恢复，只能记住地址重新推一次。
+
+        重新推流等于把这一首从头放一遍，所以「下一首」定时器必须重建：
+        打断它的那次 stop 已经把定时器取消了（见 stop() 里的
+        cancel_group_next_timer），不重建的话这一首放完就彻底静音 ——
+        「播放许嵩的歌」之后来一句「半个小时后关闭音乐」正是这样只放了一首。
         """
         url = self._pushed_url
         if not url:
@@ -1372,6 +1385,17 @@ class XiaoMusicDevice:
             return False
         self.log.info(f"恢复被打断的推流: {url}")
         await self.group_player_play(url)
+        duration = int(self._pushed_duration or 0)
+        if duration > 0:
+            delay = int(getattr(self.config, "delay_sec", 0) or 0)
+            await self.set_next_music_timeout(duration + delay)
+            self.log.info(
+                f"推流恢复后重建下一首定时器: {duration}s (delay {delay}s) did: {self.did}"
+            )
+        else:
+            self.log.warning(
+                f"推流时长未知，恢复后无法安排下一首 did: {self.did}"
+            )
         return True
 
     async def resume_pushed_url_if_stopped(self, delay=2.0, budget=8.0):
@@ -1401,8 +1425,12 @@ class XiaoMusicDevice:
         self.log.info(f"group_force_stop_xiaoai {device_id_list} {results}")
         return results
 
-    async def stop_after_minute(self, minute: int):
-        """定时关机"""
+    async def stop_after_minute(self, minute: int, tts_text: str = ""):
+        """定时关机
+
+        tts_text 覆盖确认语：语音口令「半个小时后关闭音乐」只想关音乐，
+        用默认的「关机」文案会让人以为音箱要断电。
+        """
         if self._stop_timer:
             self._stop_timer.cancel()
             self._stop_timer = None
@@ -1413,12 +1441,14 @@ class XiaoMusicDevice:
             try:
                 await self.stop(arg1="notts")
                 # 已经按用户要求停了，别留地址让后续 TTS 把它捡回来
-                self._pushed_url = ""
+                self._clear_pushed()
             except Exception as e:
                 self.log.exception(f"Execption {e}")
 
         self._stop_timer = asyncio.create_task(_do_stop())
-        await self.do_tts(f"收到,{minute}分钟后将关机", resume_after=True)
+        await self.do_tts(
+            tts_text or f"收到,{minute}分钟后将关机", resume_after=True
+        )
 
     async def cancel_next_timer(self):
         """取消下一首定时器"""

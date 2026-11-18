@@ -314,15 +314,17 @@ class XiaoMusic:
         device = self.device_manager.devices.get(did)
         if device is None:
             return None
+        duration = int(kwargs.get("duration") or 0)
         if url:
             # 记住这条推流：TTS 打断后要用它恢复播放
             device._pushed_url = url
+            # 时长也一起记住：恢复推流时要按它重建「下一首」定时器
+            device._pushed_duration = duration
         # TTS 定时器触发的 stop 可能还在收尾，等它结束再推，免得刚播就被掐
         await device.settle_before_play()
         result = await device.group_player_play(url)
         # 外部流播完后没人接手：按歌曲时长起一个「下一首」定时器，
         # 到点后 device 会先问插件队列，队列空了才回落本地列表。
-        duration = int(kwargs.get("duration") or 0)
         if url and duration > 0:
             await device.set_next_music_timeout(duration + self.config.delay_sec)
         return result
@@ -604,7 +606,9 @@ class XiaoMusic:
         except (KeyError, ValueError):
             # 如果阿拉伯数字转换失败，尝试中文数字
             minute = chinese_to_number(str(arg1))
-        return await self.device_manager.devices[did].stop_after_minute(minute)
+        return await self.device_manager.devices[did].stop_after_minute(
+            minute, tts_text=kwargs.get("tts_text", "")
+        )
 
     # 口令:加入收藏,收藏歌曲
     async def add_to_favorites(self, did="", arg1="", **kwargs):

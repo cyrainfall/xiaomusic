@@ -62,7 +62,11 @@ class CommandHandler:
             minutes = self.parse_stop_delay(query)
             if minutes is not None:
                 self.log.info(f"识别为延时关闭: {minutes} 分钟后 (原句:{query!r})")
-                await self.xiaomusic.stop_after_minute(did=did, arg1=minutes)
+                await self.xiaomusic.stop_after_minute(
+                    did=did,
+                    arg1=minutes,
+                    tts_text=f"收到,{minutes}分钟后关闭音乐",
+                )
                 return
 
             # 「音量调整为20%」这类音量口令：本地直接调，别交给大模型（会先念一句找歌）

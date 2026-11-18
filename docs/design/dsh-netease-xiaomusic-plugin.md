@@ -1094,6 +1094,17 @@ stop_after_minute() → do_tts("收到,1分钟后将关机")
 
 已知限制：小米音箱的 `play_by_url` 没有 seek，续播会把**当前这首从头开始**（不是接着 1 分 30 秒继续）。要严格续上需要改用 xiaomusic 的 `continue_play`（`play_by_music_url _type=1`，依赖小米音乐 API 的 audioID），属于另一条技术路线，暂不引入。
 
+后续（v0.25）：这条续播只补了「声音」，没补「接力」。`resume_pushed_url()` 重新推流后没有重建
+「下一首」定时器，而打断它的那次 `stop(arg1="notts")` 里 `cancel_group_next_timer()`
+已经把定时器取消了 —— 于是这一首放完就彻底静音。用户报的现象正是
+「播放许嵩的歌 → 半个小时后关闭音乐 → 只播放完当前歌曲，没有续播」。
+修法：`play_url()` 把这条推流的时长记在 `_pushed_duration` 上（外部流不在歌单里，
+没有时长就算不出下一首什么时候到点），`resume_pushed_url()` 推回去之后按
+`时长 + delay_sec` 重建定时器；重新推流等于从头播，所以用完整时长而不是剩余时长。
+配套把散落的 `_pushed_url = ""` 收进 `_clear_pushed()`（地址和时长一起忘掉），
+确认语也从「收到,N分钟后将关机」改成「收到,N分钟后关闭音乐」—— 只关音乐，别让人以为音箱要断电。
+测试 `test/test_resume_rearms_timer.py`（8 例，旧代码挂 3 例）。
+
 ### 17.0.6 「音量调整为20%」被当成点歌，先念「好的，正在找歌」
 
 现象：放着歌时说「音量调整为20%」→ 听到「好的，正在找歌」，音量不变。
@@ -1373,3 +1384,4 @@ strict-peer-dependencies=false     # 让缺失 peer 降级为 warning
 | v0.22 | 修「非音乐对话也被 xiaomusic 接管」：「六点二十叫我起床」原本走未命中兜底进大模型，xiaomusic 先掐掉小爱的应答、再让模型用 TTS 道歉，闹钟没设成。现在 `is_passthrough_to_xiaoai()` 把闹钟/天气/时间/家电/闲聊直接放行给小爱（不掐、不念 TTS、不转发），兜底改为只在 `agent_bridge_when=fallback` 时生效；新增 `agent_bridge_non_music_patterns` / `agent_bridge_query_patterns` / `agent_bridge_music_patterns`；`parse_stop_delay` 不再把「半个小时后关闭叫我起床」当延时关机；插件侧提示词先判音乐意图，并用 `isNonMusic()` 兜底丢弃非音乐的 chat 回复（17.0.10）|
 | v0.23 | 泛播放改为每日推荐：「播放音乐」「放点歌」「随便放点」这类没点名歌名/歌手的请求，不再当歌名去搜（原行为会随机落到某个歌手），改为拉账号「每日推荐」30 首整队列推给音箱，「下一首」在 30 首内接力；新增 `ncm_recommend` 工具与 `resolve.isGenericPlayRequest()`，`ncm_play` 遇泛词自动转推荐；队列上限 20→60（原先 30 首会被截断）；无 cookie/取不到推荐时退回公开热歌榜（17.0.11）|
 | v0.24 | 修「关闭音乐后过几分钟又自动播放」：`set_next_music_timeout` 到点无条件 `_play_next()`，用户在小爱侧停的（语音被小爱自己吃掉、App 暂停、或 02:00–10:00 夜间不监听）xiaomusic 全程没收到 stop，定时器照常把下一首推回去。改成旁路采样 `_watch_playback()` 记录「最后一次确认在播」时刻，到点时若该时刻已过去 >60s 判为用户关闭 → 清 `_pushed_url`、通知插件清队列、不续播；自然播完只会过去 10~20s，照旧续播。只对外部推流生效（`_watch_armed`），本地歌单行为不变。测试 `test/test_stop_respected.py`（6 例，旧代码挂 2 例）；真机验证：45s 定时器到点仍正常推进、无 Traceback（17.0.12）|
+| v0.25 | 修「播放许嵩的歌 → 半个小时后关闭音乐 → 只播放完当前歌曲，没有续播」：确认语 TTS 打断推流、`stop(notts)` 里 `cancel_group_next_timer()` 取消下一首定时器，而 `resume_pushed_url()` 只把歌推回去、没重建定时器，这一首放完就静音。`play_url()` 记 `_pushed_duration`，恢复后按「时长+delay_sec」重建；散落的 `_pushed_url=""` 收进 `_clear_pushed()`；确认语改为「收到,N分钟后关闭音乐」。测试 `test/test_resume_rearms_timer.py`（8 例，旧代码挂 3 例）（17.0.5 后续）|
