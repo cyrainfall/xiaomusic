@@ -387,7 +387,7 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
       name: 'ncm_search',
       timeoutMs: 25000,
       description:
-        '用网易云音乐（ncm-cli）搜索歌曲，返回候选及其 ID。' +
+        '用网易云音乐搜索歌曲，返回候选及其 ID。' +
         '当用户只说歌名、或你不确定有没有该版本时先搜一次；' +
         '结果里的"接口标记受限"只表示开放平台授权窗口，不代表这个账号播不了，仍可直接尝试播放。',
       parameters: {
@@ -421,7 +421,7 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
       timeoutMs: 45000,
       description:
         '在小爱音箱上播放网易云音乐的一首歌。' +
-        '优先传 encryptedId + originalId（来自 ncm_search），这样版本确定；' +
+        '优先只传 originalId（来自 ncm_search，encryptedId 可留空），这样版本确定；' +
         '只给 keyword 时本工具会自己搜一次并选最可能的版本（同名歌优先可播条目）。' +
         '播放会打断音箱当前内容。返回播放失败时按错误提示换候选或换 cookie，不要用同一首歌反复重试。',
       parameters: {
@@ -446,13 +446,13 @@ export function createTools({ cfg, ncm, netease, xm, logger, voice, queue, resol
 
         let song
         let candidates = []
-        if (args?.encryptedId && args?.originalId) {
+        if (args?.originalId) {
           song = {
             name: String(args?.keyword || '所选歌曲'),
             artists: [],
             album: '',
             durationSec: 0,
-            encryptedId: String(args.encryptedId),
+            encryptedId: String(args?.encryptedId || ''),
             originalId: String(args.originalId),
             playable: true,
           }

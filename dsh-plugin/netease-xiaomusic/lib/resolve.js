@@ -150,6 +150,36 @@ export function isGenericPlayRequest(query) {
  */
 export function createResolver({ ncm, netease, logger }) {
   /**
+   * Title search for one keyword: the web API first, ncm-cli as fallback.
+   *
+   * ncm-cli 0.1.7 shipped without the `search` subcommand, so the CLI path
+   * answers `unknown command 'search'` and every title request («放首素颜»)
+   * died with 搜歌服务出了点问题, while the performer path (「许嵩的歌」, which
+   * goes through the web API) kept working and hid it. The web endpoint needs
+   * nothing but the MUSIC_U cookie we already hold for the stream call, and
+   * returns the same item shape, so it becomes the primary path and the CLI
+   * stays as a fallback for setups that have a working one.
+   * @param {string} keyword @param {number} limit
+   */
+  async function searchSongs(keyword, limit) {
+    const web = await netease.searchWeb(keyword, { limit })
+    if (web.ok && web.items.length > 0) return web
+
+    const cli = await ncm.searchSongs(keyword, limit)
+    if (cli.ok) {
+      logger?.debug?.(`netease-xiaomusic: 「${keyword}」网页搜索无结果/不可用（${web.error || '空'}），用 ncm-cli 的结果`)
+      return cli
+    }
+    if (web.ok) return web // 网页搜过、确实没有：报「没搜到」，别把 CLI 的部署错误顶出去
+
+    return {
+      ok: false,
+      error: cli.error || web.error,
+      detail: `web=${web.detail || web.error}; cli=${cli.detail || cli.error}`.slice(0, 300),
+    }
+  }
+
+  /**
    * @param {string} name
    * @returns {Promise<{id: string, name: string}|undefined>}
    */
@@ -192,7 +222,7 @@ export function createResolver({ ncm, netease, logger }) {
       if (hit) return hit
     }
 
-    const search = await ncm.searchSongs(keyword, Math.min(20, limit))
+    const search = await searchSongs(keyword, Math.min(20, limit))
     if (!search.ok) return { ok: false, error: search.error, detail: search.detail }
 
     // No performer marker, but the title search found nothing that actually

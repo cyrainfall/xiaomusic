@@ -1060,6 +1060,20 @@ ctx.on("agent/pre-step", (payload, next) =>
 
 > 排查提示：调试时用 `curl -d '{"query":"中文"}'` 在 Windows shell 下会把中文发成乱码字节（会话记录里能看到 `С������Pro`），模型因此判「没听清」。要验证请用 UTF-8 的 Node/Python 脚本发请求（`tools/*.mjs` 里的 `.tmp-probe/ask-test.mjs`）。
 
+后续（v0.26）：歌手路径一直好使，把同一个解析器里**按歌名搜索**的故障盖住了。ncm-cli 0.1.7
+根本没有 `search` 子命令（`ncm-cli --help` 里只有 play/pause/queue/state/login…），
+`resolve.candidates()` 走 `ncm.searchSongs` 就返回 `unknown command 'search'`，于是
+「放首素颜」「播放稻香」这类点歌全部回「搜歌服务出了点问题」（2026-11-18 13:17 的「迪迦」就是它）。
+「XX的歌」走 `searchArtist`/`artistTopSongs`（网页接口）、「播放音乐」走每日推荐，都不受影响，
+所以症状看起来像「只有某些歌点不了」。
+修法：`resolve.js` 里把搜索顺序换成 **网页接口优先、ncm-cli 兜底** ——
+`netease.searchWeb()` 用同一个 `MUSIC_U` cookie 调 `/api/search/get/web`，返回结构一致；
+两边都空/都挂时分别保留「确实没搜到」和「两条失败原因」，不再把 CLI 的部署错误顶给用户。
+顺带把 `ncm_play` 的 ID 入参从「encryptedId + originalId 都要」放宽成「有 originalId 就够」
+（网页搜索结果没有 32 位加密 ID，直链解析本来也只用 originalId）。
+测试 `dsh-plugin/netease-xiaomusic/test/search-fallback.mjs`（7 例，含联网实测：
+素颜→许嵩、直链可取、「播放许嵩的歌」仍走 artist 路径）。
+
 ### 17.0.5 「一分钟后关闭音乐」确认完就没声了
 
 现象：`播放许嵩的歌` → 音乐正常 → `一分钟后关闭音乐` → 听到「收到，1分钟后将关机」→ **音乐不再响起**（但 60 秒后确实停了）。
@@ -1385,3 +1399,4 @@ strict-peer-dependencies=false     # 让缺失 peer 降级为 warning
 | v0.23 | 泛播放改为每日推荐：「播放音乐」「放点歌」「随便放点」这类没点名歌名/歌手的请求，不再当歌名去搜（原行为会随机落到某个歌手），改为拉账号「每日推荐」30 首整队列推给音箱，「下一首」在 30 首内接力；新增 `ncm_recommend` 工具与 `resolve.isGenericPlayRequest()`，`ncm_play` 遇泛词自动转推荐；队列上限 20→60（原先 30 首会被截断）；无 cookie/取不到推荐时退回公开热歌榜（17.0.11）|
 | v0.24 | 修「关闭音乐后过几分钟又自动播放」：`set_next_music_timeout` 到点无条件 `_play_next()`，用户在小爱侧停的（语音被小爱自己吃掉、App 暂停、或 02:00–10:00 夜间不监听）xiaomusic 全程没收到 stop，定时器照常把下一首推回去。改成旁路采样 `_watch_playback()` 记录「最后一次确认在播」时刻，到点时若该时刻已过去 >60s 判为用户关闭 → 清 `_pushed_url`、通知插件清队列、不续播；自然播完只会过去 10~20s，照旧续播。只对外部推流生效（`_watch_armed`），本地歌单行为不变。测试 `test/test_stop_respected.py`（6 例，旧代码挂 2 例）；真机验证：45s 定时器到点仍正常推进、无 Traceback（17.0.12）|
 | v0.25 | 修「播放许嵩的歌 → 半个小时后关闭音乐 → 只播放完当前歌曲，没有续播」：确认语 TTS 打断推流、`stop(notts)` 里 `cancel_group_next_timer()` 取消下一首定时器，而 `resume_pushed_url()` 只把歌推回去、没重建定时器，这一首放完就静音。`play_url()` 记 `_pushed_duration`，恢复后按「时长+delay_sec」重建；散落的 `_pushed_url=""` 收进 `_clear_pushed()`；确认语改为「收到,N分钟后关闭音乐」。测试 `test/test_resume_rearms_timer.py`（8 例，旧代码挂 3 例）（17.0.5 后续）|
+| v0.26 | 修「按歌名点歌全挂」：ncm-cli 0.1.7 没有 `search` 子命令，`resolve.candidates()` 一调就 `unknown command 'search'`，「放首素颜」「播放稻香」全回「搜歌服务出了点问题」（「XX的歌」「播放音乐」不受影响，所以一直没被发现）。改为**网页搜索优先**（`netease.searchWeb`，同一 MUSIC_U cookie）、ncm-cli 兜底；`ncm_play` 放宽为有 `originalId` 即可。测试 `test/search-fallback.mjs`（7 例，含联网实测）（17.0.4 后续）|
